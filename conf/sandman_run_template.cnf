@@ -1,0 +1,21 @@
+[GLOBAL]
+base_dir =
+geneset_file = 
+exclude_region_file = $SANDMAN/mhc.tab
+tss_extension = 200000
+filter=!snps.gr$mhc
+perm_number=1000
+analysis=<<ANALYSIS
+analysis1 SET.test SET.ref
+ANALYSIS
+mart_host=www.ensembl.org
+
+[DATASET ds1]
+gt_dir=
+pval_file=
+snp_catalog=
+
+[DATASET ds2]
+gt_dir=
+pval_file=
+snp_catalog=

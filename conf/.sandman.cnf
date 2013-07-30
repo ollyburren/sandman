@@ -1,0 +1,12 @@
+[SM]
+qsub=qsub -q all.q -v R_LIBS=
+rscript=/usr/bin/Rscript
+use_q=1
+keep_tmp_files=1
+grid_scratch=
+q_poll_time=5
+tabix_bin=tabix
+default_snp_catalogue=#http at some stage
+tabix_chunksize=100
+default_mart_host=www.ensembl.org
+default_perm_per_chunk=1000
