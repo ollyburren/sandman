@@ -296,7 +296,7 @@ assignGTToFile<-function(chrs,path){
 	results
 }
 
-compute.mvs.perms<-function(sig.gene,snps.gr,n.perms){
+compute.mvs.perms<-function(sig.gene,n.perms){
 	perms<-do.call("rbind",lapply(seq_along(sig.gene),function(i){
 	  mvs<-matrix()
 	  x<-sig.gene[[i]]
@@ -319,6 +319,8 @@ compute.mvs.perms<-function(sig.gene,snps.gr,n.perms){
     rownames(mvs)<-rownames(x)
     mvs
   }))
+  ## is this needed ?
+  perms
 }
 
 ## consider replacing some of below with that above (ATM there is a problem
@@ -425,5 +427,72 @@ runZ<-function(sigma,snps.gr,test.set,ctrl.set,n.perms){
 }
 
 
+## with prefilter turned on we pull back each of the SNPs that is in our dataset
+## and compute the mvs on this. If turned off we compute perms for all SNPs
+## in underlying sigma files and then filter afterwards which is much slower.
+## I think that the former is the best way forward as we extend to effectively sample
+## LD within the recomb block that we have data for and also get the speed benefits
+## and permute based on that irrespective of gene boundaries
+##
+
+## envisages that you have generated sigma for a 1kgenome population
+## see code in this dir for that, and then you have indexed using 
+## create_sig_index - the index file can be saved for retrieval
+
+gen_perms_1kg<-function(index.gr,gene.gr,slist,n.perms,prefilter=TRUE){
+
+  ol.files<-subsetByOverlaps(index.gr,gene.gr)$file
+  
+  ## as things are setup we have to process each block of sigmas independantly 
+  ## and then join at the end
+  
+  	retval <- lapply(ol.files,function(x){
+  		assign('t',get(load(x)))
+  		sigma.gr<-subsetByOverlaps(t,gene.gr)
+  		sigma.list<-lapply(seq_along(sigma.gr),function(i){
+  	 		s<-sigma.gr[i]$sigma[[1]]
+  	 		index<-which(rownames(s) %in% slist)
+  	 		#print(index)
+  	 		if(length(index)==0)
+  	 			return(NA)
+  	 		if(length(index)==1){
+         print("Only one snp")
+         snp.name<-colnames(s)[index]
+         return(Matrix(1,dimnames = list(snp.name,snp.name)))
+        }
+        ## We need to capture the sigma for all variation in this block
+        ## to get acurate sampling of LD 
+        ## this will make things slower but I think it is neccessary.
+        if(prefilter)
+        	s<-s[index,index]
+        if(!is.positive.definite(s,,method="chol")){
+        	#this recurses through various values of diag if we exceed 1 then
+        	#we compute the closest matrix that is positive definite.
+        	s<-attempt.pos.def(s)
+        }
+        ## cut out the snps we want
+        if(!prefilter){
+        	s[index,index]
+        }else{
+        	s
+        }
+      })
+      compute.mvs.perms(sigma.list,n.perms)
+    })
+    do.call("rbind",retval)
+}
+
+create_sigma_dir_index<-function(in.dir){
+	files<-list.files(path=ind.dir,pattern="*.RData$",full.name=TRUE)
+	library(GenomicRanges)
+	## parse filenames to make a GRanges object
+	tmp<-gsub("\\.RData","",basename(files))
+
+	chr=gsub("^([^_]+).*","\\1",tmp)
+	start=as.numeric(gsub(".*_([^\\-]+)\\-.*","\\1",tmp))
+	end=as.numeric(gsub(".*_[^\\-]+\\-(.*)","\\1",tmp))
+
+	GRanges(seqnames=Rle(chr),ranges=IRanges(start=start,end=end),file=files)
+}
 
 	

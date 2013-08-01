@@ -1,38 +1,15 @@
 #!/usr/bin/RScript
-source("/home/oliver/MVS/R/miscFunctions.R",echo=TRUE) #should source libs we need
 
-test=0
-
-## INPUTS
-## MISC FUNCTIONS PATH - EVENTUALLY REPLACE
-## TABLE OF SNP AND P.VALS
-## TABLE OF GENES AND GENE_SETS
-## OUTPUT FILE
-## TABLE OF EXCLUDED REGIONS (BED FORMAT)
-
-## OUTPUTS NONE SAVES AN RDATA OBJECT TO OUTPUT FILE
-if(!test){
-  args<-commandArgs(TRUE)
-  if(length(args) < 5){
-    cat("Error incorrect number of args","\n",sep="")
-    q()
-  }else{
-    for(i in 1:length(args)){
-        eval(parse(text=args[[i]]))
-    }
-  }
+args<-commandArgs(TRUE)
+if(length(args) < 6){
+  cat("Error incorrect number of args","\n",sep="")
+  q()
 }else{
-  snp.file='/dunwich/scratch/olly/SANDMAN/test_p.vals.tab'
-  gene.file='/dunwich/scratch/olly/SANDMAN/test_gene_set.tab'
-  excl.file='/dunwich/scratch/olly/SANDMAN/mhc.tab'
-  out.file='/stats/olly/SANDMAN/test/wtccc/scratch/snps/snp.gr.RData'
-  tabix.bin='~/src/tabix/tabix-0.2.6/tabix'
-  ## eventually we will put this on the internet
-  tabix.snp.catalogue.file='/stats/oliver/TABIX/dbSNP135.bed.gz'
-  chunksize=100
-  mart_host<-'feb2012.archive.ensembl.org'
-  tss.extension<-200000
+  for(i in 1:length(args)){
+    eval(parse(text=args[[i]]))
+  }
 }
+source(misc.functions) #should source libs we need
 
 ## we check all the args on the perl side as it's easier
 
@@ -65,7 +42,6 @@ grl<-split(red.gr,cut(seq_along(red.gr),seq(0,length(red.gr)+chunksize,by=chunks
 snp.loc<-do.call("rbind",
 	lapply(grl,function(x){
 		df<-as.data.frame(x)[,1:3]
-		#print(grep("chr[^0-9XY]+$",df[,1]))
 		df<-df[grep("^chr[0-9XY]+$",df[,1]),]
 		tabix.param<-paste(paste(df[,1],':',df[,2],'-',df[,3],sep=""),collapse=" ")
 		tabix.cmd<-paste(tabix.bin,tabix.snp.catalogue.file)

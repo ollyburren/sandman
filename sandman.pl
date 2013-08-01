@@ -25,7 +25,7 @@ use Term::ReadKey;
 use Data::Dumper;
 use Cwd;
 use Config::IniFiles;
-use Storable qw( store retrieve );
+#use Storable qw( store retrieve );
 
 ## GLOBALS
 
@@ -37,7 +37,9 @@ use vars(qw/
 %RSCRIPTS=(
 	create_support_files=>'create_support_files.R',
 	compute_sigma=>'compute_sigma.R',
-	compute_mvs_perms=>'compute_mvs_perms.R');
+	compute_mvs_perms=>'compute_mvs_perms.R',
+  misc_functions=>'miscFunctions.R' ## these need a tidy
+);
 
 %MAND_PARAM=(
 	file=>{
@@ -161,17 +163,17 @@ sub parse_args{
 
 my %ds_params;
 my $cfg=parse_args($inifile);	 
-if(!-e './params.store'){
+#if(!-e './params.store'){
 	
 	foreach my $ds ($cfg->GroupMembers('DATASET')){
 		print $ds."\n";
 		$ds_params{$ds}=analyse_dataset($cfg,$ds);
 	}
-	store(\%ds_params, './params.store');
-}else{
-	my $hf = retrieve('./params.store');
-	%ds_params = %$hf;
-}
+	#store(\%ds_params, './params.store');
+#}else{
+#	my $hf = retrieve('./params.store');
+#	%ds_params = %$hf;
+#}
 
 ## for testing 
 
@@ -512,7 +514,7 @@ sub make_support_files{
 	my ($snpfile,$genefile,$outfile,
 			$exclfile,$tabix,$snpcat,
 			$tabix_chunksize,$mart_host,$tss_extension,$log_dir)=@_;
-	my $cmd = "$GLOBALS{SM}{rscript} $RSCRIPTS{create_support_files} snp.file=\\'$snpfile\\' ";
+	my $cmd = "$GLOBALS{SM}{rscript} $RSCRIPTS{create_support_files} snp.file=\\'$snpfile\\' misc.functions=\\'$RSCRIPTS{misc_functions}\\' ";
 	$cmd.= "gene.file=\\'$genefile\\' excl.file=\\'$exclfile\\' ";
 	$cmd.= "out.file=\\'$outfile\\' tabix.bin=\\'$tabix\\' ";
 	$cmd.= "tabix.snp.catalogue.file=\\'$snpcat\\' chunksize=$tabix_chunksize ";
@@ -642,7 +644,7 @@ sub create_sigmas{
       if(/\.RData$/){
       	my $out_file = $sigma_dir.'/'.basename($_,'.RData').".sigma.RData";
       	my $cmd = "$GLOBALS{SM}{rscript} $RSCRIPTS{compute_sigma} snp.file=\\'$File::Find::name\\' ";
-      	$cmd.= "gt.dir=\\'$gt_dir\\' out.file=\\'$out_file\\'";
+      	$cmd.= "gt.dir=\\'$gt_dir\\' out.file=\\'$out_file\\' misc.functions=\\'$RSCRIPTS{misc_functions}\\'";
       	my $jid = dispatch_Rscript($cmd,"$log_dir/compute_sigma");
       	debug("Running job $jid");
       	## create a hash of script params that we want to pass downstream
@@ -717,7 +719,7 @@ sub compute_perms{
     		my $out_file = $permdir.'/'.basename($snpfile,'.RData').".perms.$x.RData";
       	#my $cmd = "$RSCRIPT ${RSCRIPT_DIR}compute_mvs_perms.R snp.file=\\'$snpfile\\' ";
   	my $cmd = "$GLOBALS{SM}{rscript} $RSCRIPTS{compute_mvs_perms} snp.file=\\'$snpfile\\' ";
-      	$cmd.= "sigma.file=\\'$sigmafile\\' out.file=\\'$out_file\\' n.perms=$number_perms";
+      	$cmd.= "sigma.file=\\'$sigmafile\\' out.file=\\'$out_file\\' n.perms=$number_perms misc.functions=\\'$RSCRIPTS{misc_functions}\\'";
       	debug($cmd);
       	my $jid = dispatch_Rscript($cmd,"$log_dir/compute_perms");
       	debug("Running job $jid");
