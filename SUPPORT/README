@@ -1,0 +1,7 @@
+HOW TO PRECOMPUTE SIGMA
+
+## NOTE THIS IS REALLY ONLY FOR INTERNAL USE !! DATABASE DEPENDENCIES ARE AVAILABLE ON REQUEST
+
+1. ./R/generate_hapmap_recomb_regions.R - This creates for the genome a set of genomic regions that correspond to recomb blocks based on hapmap. Note database etc needs filling in.
+2. configure and run ./perl/cal_sigma_1kg.pl ## note requires queue or access to compute farm
+3. ./R/create_hapmap_index.R creates an index that is compatible with sandman
