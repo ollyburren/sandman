@@ -9,6 +9,7 @@ analysis=<<ANALYSIS
 analysis1 SET.test SET.ref
 ANALYSIS
 mart_host=www.ensembl.org
+sigma_index=
 
 [DATASET ds1]
 gt_dir=

@@ -426,6 +426,49 @@ runZ<-function(sigma,snps.gr,test.set,ctrl.set,n.perms){
         Z.value(W=W,Wstar=Wstar,n.in=n.in,n.out=n.out)
 }
 
+## this routine takes a special index file and 
+## a list of snps and then returns a list of 
+## corresponding sigma objects
+
+retrieve_sigma<-function(index.gr,snps.gr){
+	if(!is(snps.gr,"GRanges"))
+		stop("snp.gr parameter must be a GRanges object")
+	snps.grl<-split(snps.gr,seqnames(snps.gr))
+	## remove chromosomes with no genes
+	snps.grl<-snps.grl[which(sapply(snps.grl,length)>0)]
+	## remove non standard chromosomes
+	snps.grl<-snps.grl[grep("[0-9X]+",names(snps.grl))]
+	## narrow down to files
+	results<-list()
+	for(chr in names(snps.grl)){
+		snp.list<-snps.gr[seqnames(snps.gr)==chr,]$name
+		ol.files<-subsetByOverlaps(index.gr,snps.gr)$file
+		if(length(ol.files)==0){
+			print("No sigmas found for this chr found in index")
+			return();
+		}
+		retval<-lapply(ol.files,function(x){
+  		assign('sigma',get(load(x)))
+  		index<-which(rownames(sigma) %in% snp.list)
+  		if(length(index)==0 ){
+  			ol.snps<-subsetByOverlaps(snps.gr,t)$name
+  			print("WARNING: Expecting some SNPs but none found, list of SNPs missing:")
+  			print(ol.snps)
+  			return(NA)
+  		}
+  		if(length(index)==1){
+  			snp.name<-colnames(sigma)[index]
+  			return(Matrix(1,dimnames = list(snp.name,snp.name)))
+  		}
+  			sigma[index,index]
+  	})
+  	##end for
+  	results[[chr]]<-unlist(retval)
+  }
+  results<-unlist(results)
+  results
+}
+
 
 ## with prefilter turned on we pull back each of the SNPs that is in our dataset
 ## and compute the mvs on this. If turned off we compute perms for all SNPs

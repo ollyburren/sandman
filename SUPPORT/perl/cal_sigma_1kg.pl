@@ -19,7 +19,7 @@ my $FILEPATTERN='RData$';
 $FILEPATTERN='chr1_.*\.RData$' if $TEST;
 my $QUEUE = 'all.q';
 my $QSUBCMD="qsub -q $QUEUE -v R_LIBS=/home/oliver/R_packages/";
-my $RSCRIPT='/usr/bin/Rscript /home/oliver/GIT_REPOS/sandman/calc_sigma_recomb.R';
+my $RSCRIPT='/usr/bin/Rscript /home/oliver/GIT_REPOS/sandman/SUPPORT/R/calc_sigma_recomb.R';
 
 my $BASE_DIR = $ROOT_DIR;
 my $logdir = "${BASE_DIR}log/";

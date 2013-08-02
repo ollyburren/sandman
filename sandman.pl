@@ -31,12 +31,13 @@ use Config::IniFiles;
 
 use vars(qw/
 	%DIRS $GRID_SCRATCH $SNP_CATALOGUE $MART_HOST
-	%RSCRIPTS %MAND_PARAM %DEFAULT_PARAM $SANDMAN_ROOT
+	%RSCRIPTS %MAND_PARAM %DEFAULT_PARAM $SANDMAN_ROOT $BASE_DIR
 	/);
 
 %RSCRIPTS=(
 	create_support_files=>'create_support_files.R',
 	compute_sigma=>'compute_sigma.R',
+	retrieve_sigma=>'retrieve_sigma.R',
 	compute_mvs_perms=>'compute_mvs_perms.R',
   misc_functions=>'miscFunctions.R' ## these need a tidy
 );
@@ -48,7 +49,7 @@ use vars(qw/
 	},
 	dir=>{
 		GLOBAL=>['base_dir'],
-		DATASET=>['gt_dir'] ## currently MANDATORY as otherwise cannot compute SIGMA
+		#DATASET=>['gt_dir'] ## currently MANDATORY as otherwise cannot compute SIGMA
 	},
 	array=>{
 		GLOBAL=>['analysis']
@@ -161,19 +162,25 @@ sub parse_args{
 	return $cfg;
 }
 
+
+
+
 my %ds_params;
 my $cfg=parse_args($inifile);	 
-#if(!-e './params.store'){
-	
-	foreach my $ds ($cfg->GroupMembers('DATASET')){
-		print $ds."\n";
-		$ds_params{$ds}=analyse_dataset($cfg,$ds);
+
+$BASE_DIR=$cfg->val('GLOBAL','base_dir').'/';
+
+if(-e "$BASE_DIR/results.tab"){
+	if(yesno("Already completed this analysis: show results and exit ?")){
+		print_results($BASE_DIR);
+		exit(1);
 	}
-	#store(\%ds_params, './params.store');
-#}else{
-#	my $hf = retrieve('./params.store');
-#	%ds_params = %$hf;
-#}
+}
+
+foreach my $ds ($cfg->GroupMembers('DATASET')){
+	print $ds."\n";
+	$ds_params{$ds}=analyse_dataset($cfg,$ds);
+}
 
 ## for testing 
 
@@ -195,15 +202,17 @@ foreach my $ds (keys %ds_params){
 
 #die(Dumper(%zparams));
 
-my $results_dir = $cfg->val('GLOBAL','base_dir');
+
 
 foreach my $analysis(keys %zparams){
-		my $resoutfile = $cfg->val('GLOBAL','base_dir')."/$analysis.Z.RData";
+		my $resoutfile = "$BASE_DIR/$analysis.Z.RData";
 		compute_Z($zparams{$analysis}{wfile},
 			$zparams{$analysis}{wstarfile},
-			$resoutfile,$results_dir."/$DIRS{LOG}"
+			$resoutfile,$BASE_DIR."/$DIRS{LOG}"
 			);
 }
+
+print_results($BASE_DIR);
 
 
 
@@ -238,6 +247,7 @@ sub analyse_dataset{
 	#ref_set=>$cfg->val('GLOBAL','ref_set'),
 	filter=>$cfg->val('GLOBAL','filter'),
 	perm_number=>$cfg->val('GLOBAL','perm_number'),
+	sigma_index=>$cfg->val('GLOBAL','sigma_index'),
 	);
 	
 	## set up analysis
@@ -282,15 +292,28 @@ sub analyse_dataset{
 	my $run_sigma = 1;
 	if(-e $sigdotfile && !$FORCE_STEP{sigma}){
 		$run_sigma = 0 unless yesno("sigma files found do you wish to recompute?");
-	}
-	
+	}	
 	if($run_sigma){
-		$rhash = create_sigmas(
-		$snp_file,
-		$dirs->{SIGMA},
-		$targs{gt_dir},
-		$dirs->{SSNP},
-		$dirs->{LOG});
+    ##check as to whether we should use pregenerated sigmas
+    if($targs{sigma_index}){
+      ##retrieve sigmas
+      $rhash = retrieve_sigmas(
+        $snp_file,
+        $dirs->{SIGMA},
+        $targs{sigma_index},
+        $dirs->{SSNP},
+        $dirs->{LOG});
+    }else{
+      if(!-d $targs{gt_dir}){
+        die("Cannot find genotype dir $targs{gt_dir}: If you haven't got genotypes consider using precomputed sigmas (sigma_index parameter)\n.")
+      }
+		  $rhash = create_sigmas(
+		    $snp_file,
+		    $dirs->{SIGMA},
+		    $targs{gt_dir},
+		    $dirs->{SSNP},
+		    $dirs->{LOG});
+    }
 		my @jids = keys(%$rhash);
 		return if !@jids;
 		do{sleep($GLOBALS{SM}{q_poll_time})} until check_task_finished(\@jids);
@@ -628,6 +651,46 @@ sub collapse_perms{
  
 ## TODO unlink tmp files 
 
+sub retrieve_sigmas{
+  my ($snp_file,$sigma_dir,$sig_index,$scratch_dir,$log_dir)=@_;
+  my @jids;
+  my %return;
+  if($GLOBALS{SM}{use_q}){
+    #we blow away contents of scratch_dir each time
+    remove_tree($scratch_dir,{keep_root => 1,result=> \my $del_dirs});
+    debug(join("\n",@$del_dirs));
+    my $jid = prepare_snps_for_q($scratch_dir,$snp_file,$log_dir);
+    do{sleep($GLOBALS{SM}{q_poll_time})} until check_task_finished([$jid]);
+    find(sub{
+      debug($_);
+      if(/\.RData$/){
+        my $out_file = $sigma_dir.'/'.basename($_,'.RData').".sigma.RData";
+         my $cmd = "$GLOBALS{SM}{rscript} $RSCRIPTS{retrieve_sigma} snp.file=\\'$File::Find::name\\' ";
+        $cmd.= "sigma.index.file=\\'$sig_index\\' out.file=\\'$out_file\\' misc.functions=\\'$RSCRIPTS{misc_functions}\\'";
+        my $jid = dispatch_Rscript($cmd,"$log_dir/retrieve_sigma");
+        debug("Running job $jid");
+        ## create a hash of script params that we want to pass downstream
+        $return{$jid}={
+          snpfile=>$File::Find::name,
+          sigmafile=>$out_file
+        };
+      }
+    },$scratch_dir);
+  }else{
+    my $out_file = $sigma_dir.'/all.sigma.RData';
+    my $cmd = "$GLOBALS{SM}{rscript} $RSCRIPTS{retrieve_sigma} snp.file=\\'$snp_file\\' ";
+    $cmd.= "sigma.index.file=\\'$sig_index\\' out.file=\\'$out_file\\' misc.functions=\\'$RSCRIPTS{misc_functions}\\'";
+    dispatch_Rscript($cmd,"$log_dir/retrieve_sigma");
+    $return{NOQ}={
+        snpfile=>$snp_file,
+        sigmafile=>$out_file
+    };
+  }
+  return \%return;
+}
+
+  
+
 sub create_sigmas{
   my ($snp_file,$sigma_dir,$gt_dir,$scratch_dir,$log_dir)=@_;
   #create a temp dir
@@ -656,8 +719,8 @@ sub create_sigmas{
     },$scratch_dir);
   }else{
     my $out_file = $sigma_dir.'/all.sigma.RData';
-    my $cmd = "$GLOBALS{SM}{rscript} compute_sigma.R snp.file=\\'$snp_file\\' ";
-    $cmd.= "gt.dir=\\'$gt_dir\\' out.file=\\'$out_file\\'";
+    my $cmd = "$GLOBALS{SM}{rscript} $RSCRIPTS{compute_sigma} snp.file=\\'$snp_file\\' ";
+    $cmd.= "gt.dir=\\'$gt_dir\\' out.file=\\'$out_file\\' misc.functions=\\'$RSCRIPTS{misc_functions}\\'";
     dispatch_Rscript($cmd,"$log_dir/compute_sigma");
     $return{NOQ}={
     		snpfile=>$snp_file,
@@ -668,6 +731,30 @@ sub create_sigmas{
 }
 
 ## compute W
+
+sub print_results{
+	my ($base_dir)=@_;
+	my ($fh,$fname) = &get_tmp_file($GLOBALS{SM}{grid_scratch});
+	my $R=<<REND;
+result.files<-list.files(path="$base_dir",pattern="*.RData",full.name=TRUE)
+rlist<-lapply(result.files,function(x){
+  get(load(x))
+})
+names(rlist)<-gsub(".Z.RData\$","",basename(result.files))
+res<-sapply(rlist,function(x){
+  list(Z.emp=x\$Z.empirical\$statistic,emp.p.val=x\$Z.empirical\$p.value,
+  Z.theo=x\$Z.theoretical\$statistic,theo.p.val=x\$Z.theoretical\$p.value)
+})
+write.table(res,file='$base_dir/results.tab',quote=FALSE,sep="\\t")
+print(res)
+REND
+	print $fh $R;
+  close($fh);
+  #my $cmd = "$RSCRIPT --vanilla $fname > /dev/null 2>&1";
+  my $cmd = "$GLOBALS{SM}{rscript} --vanilla $fname";
+  print `$cmd`; 
+  unlink($fname) unless $GLOBALS{SM}{keep_tmp_files};
+}
 
 sub compute_w{
 	my ($snpfile,$outfile,$test_set,$ctrl_set,$filter,$missfile,$logdir)=@_;

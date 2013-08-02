@@ -35,7 +35,7 @@ thou_gen_data_dir<-'/stats/oliver/1KGenome/VCF/CEU/CEU.'
 call.rate<-0.99
 z.HWE.co<-25
 
-#region.file<-'/stats/oliver/1KGenome/RECOMB_0.1_REGIONS/chr22_42869454-43646647.RData'
+#region.file<-''
 
 out.file<-gsub("RECOMB_0.1_REGIONS","SIGMA",region.file)
 
@@ -69,7 +69,7 @@ regions.gr$sigma<-lapply(names(ranges(regions.gr)),function(x){
 	region.snpm<-suppressWarnings(genotypeToSnpMatrix(calls,a0,a1))
 	## do some QC 
 	## this means that there are no snps in this region
-	if(nrow(region.snpm$map)==0)
+	if(nrow(region.snpm$map)==0 || sum(!region.snpm$map$ignore)==0)
 		return(NA)
 	sum<-col.summary(region.snpm$genotypes)
 	ok.index<-which(with(sum, Call.rate >= call.rate & z.HWE^2 < z.HWE.co ))
