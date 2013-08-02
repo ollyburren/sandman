@@ -11,8 +11,8 @@ if(length(args) < 2){
 }
 
 library(GenomicRanges)
-#in.file<-'/stats/oliver/1KGenome/SIGMA_ALL/chr6_92013-380789.RData'
-#out.dir<-'/stats/oliver/1KGenome/tmp/'
+#in.file<-''
+#out.dir<-''
 
 assign('t',get(load(in.file)))
 fnames<-lapply(seq_along(t),function(y){

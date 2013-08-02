@@ -13,13 +13,13 @@ use File::Temp qw/tempfile/;
 #CONFIGURATION#
 ###############
 my $TEST = 1; #IF set to true allows us to test the script by running only a few jobs
-my $ROOT_DIR = '/stats/oliver/1KGenome/cal_sigma/';
-my $DATADIR = '/stats/oliver/1KGenome/RECOMB_0.1_REGIONS/';
+my $ROOT_DIR = '/stats/sandman/1KGenome/cal_sigma/';
+my $DATADIR = '/stats/sandman/1KGenome/RECOMB_0.1_REGIONS/';
 my $FILEPATTERN='RData$';
 $FILEPATTERN='chr1_.*\.RData$' if $TEST;
 my $QUEUE = 'all.q';
-my $QSUBCMD="qsub -q $QUEUE -v R_LIBS=/home/oliver/R_packages/";
-my $RSCRIPT='/usr/bin/Rscript /home/oliver/GIT_REPOS/sandman/SUPPORT/R/calc_sigma_recomb.R';
+my $QSUBCMD="qsub -q $QUEUE -v R_LIBS=/home/sandman/R_packages/";
+my $RSCRIPT='/usr/bin/Rscript /home/sandman/GIT_REPOS/sandman/SUPPORT/R/calc_sigma_recomb.R';
 
 my $BASE_DIR = $ROOT_DIR;
 my $logdir = "${BASE_DIR}log/";

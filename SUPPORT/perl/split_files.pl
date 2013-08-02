@@ -13,13 +13,13 @@ use File::Temp qw/tempfile/;
 #CONFIGURATION#
 ###############
 my $TEST = 0; #IF set to true allows us to test the script by running only a few jobs
-my $ROOT_DIR = '/stats/oliver/1KGenome/split_sigma/';
-my $DATADIR = '/stats/oliver/1KGenome/SIGMA_TMP/';
+my $ROOT_DIR = '/sandman/1KGenome/split_sigma/';
+my $DATADIR = '/sandman/1KGenome/SIGMA_TMP/';
 my $FILEPATTERN='RData$';
 $FILEPATTERN='chr1_.*\.RData$' if $TEST;
 my $QUEUE = 'all.q';
-my $QSUBCMD="qsub -q $QUEUE -v R_LIBS=/stats/oliver/R_packages";
-my $RSCRIPT='/usr/bin/Rscript /home/oliver/GIT_REPOS/sandman/SUPPORT/R/split_sigma.R';
+my $QSUBCMD="qsub -q $QUEUE -v R_LIBS=/sandman/R_packages";
+my $RSCRIPT='/usr/bin/Rscript /home/sandman/GIT_REPOS/sandman/SUPPORT/R/split_sigma.R';
 
 my $BASE_DIR = $ROOT_DIR;
 my $logdir = "${BASE_DIR}log/";
@@ -36,7 +36,7 @@ find(sub {
 			my $cmd = "$QSUBCMD -o $logfile -j y $fname";
 my $s=<<SHELL;
 #!/bin/bash
-$RSCRIPT in.file=\\'$File::Find::name\\' out.dir=\\'/stats/oliver/1KGenome/tmp/\\'
+$RSCRIPT in.file=\\'$File::Find::name\\' out.dir=\\'/sandman/1KGenome/tmp/\\'
 SHELL
 			print $fh $s;
 			close($fh);

@@ -6,7 +6,7 @@ library(GenomicRanges)
 
 seqnames<-paste("chr",1:22,sep="")
 recomb.thresh=0.1
-out.dir='/stats/oliver/1KGenome/RECOMB_0.1_REGIONS/'
+out.dir='/stats/sandman/1KGenome/RECOMB_0.1_REGIONS/'
 uname<-''
 dbname<-''
 hostname<-''

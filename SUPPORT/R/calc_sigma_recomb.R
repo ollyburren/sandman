@@ -30,7 +30,7 @@ if(length(args)<1){
 
 source("~/MVS/R/miscFunctions.R")
 
-thou_gen_data_dir<-'/stats/oliver/1KGenome/VCF/CEU/CEU.'
+thou_gen_data_dir<-'/stats/sandman/1KGenome/VCF/CEU/CEU.'
 
 call.rate<-0.99
 z.HWE.co<-25
