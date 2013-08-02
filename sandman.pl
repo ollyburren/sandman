@@ -32,6 +32,7 @@ use Config::IniFiles;
 use vars(qw/
 	%DIRS $GRID_SCRATCH $SNP_CATALOGUE $MART_HOST
 	%RSCRIPTS %MAND_PARAM %DEFAULT_PARAM $SANDMAN_ROOT $BASE_DIR
+	%SKIP_STEP
 	/);
 
 %RSCRIPTS=(
@@ -39,6 +40,7 @@ use vars(qw/
 	compute_sigma=>'compute_sigma.R',
 	retrieve_sigma=>'retrieve_sigma.R',
 	compute_mvs_perms=>'compute_mvs_perms.R',
+	retrieve_perms=>'retrieve_perms.R',
   misc_functions=>'miscFunctions.R' ## these need a tidy
 );
 
@@ -78,7 +80,7 @@ if(! $SANDMAN_ROOT){
 %DIRS=(
 	SCRATCH=>'scratch',
 	TSNP=>'scratch/snps',
-	SSNP=>'scratch/sigma_snps',
+	SSNP=>'scratch/split_snps',
 	TPERMS=>'scratch/perms',
 	SIGMA=>'sigma', ## change this to use scratch/sigma as more logical
 	WSTAR=>'wstar',
@@ -228,6 +230,7 @@ sub analyse_dataset{
 	    debug("Cannot find $snp_cat for this datasource: using $SNP_CATALOGUE");
 	  }
 	}
+	my %SKIP_STEP=();
 	my %FORCE_STEP=(
 		support=>0,
 		sigma=>0);
@@ -236,21 +239,24 @@ sub analyse_dataset{
 	
 	##for ease !!
 	my %targs = (
-	base_dir=> $cfg->val('GLOBAL','base_dir').'/',
-	pval_file => $cfg->val($dataset,'pval_file'),
-	datasource_name => $DS_NAME,
-	geneset_file => $cfg->val('GLOBAL','geneset_file'),     
-	exclude_region_file => $cfg->val('GLOBAL','exclude_region_file'),
-	tss_extension => $cfg->val('GLOBAL','tss_extension'),
-	gt_dir=> $cfg->val($dataset,'gt_dir'),
-	#test_set=>$cfg->val('GLOBAL','test_set'),
-	#ref_set=>$cfg->val('GLOBAL','ref_set'),
-	filter=>$cfg->val('GLOBAL','filter'),
-	perm_number=>$cfg->val('GLOBAL','perm_number'),
-	sigma_index=>$cfg->val('GLOBAL','sigma_index'),
+		base_dir=> $cfg->val('GLOBAL','base_dir').'/',
+		pval_file => $cfg->val($dataset,'pval_file'),
+		datasource_name => $DS_NAME,
+		geneset_file => $cfg->val('GLOBAL','geneset_file'),     
+		exclude_region_file => $cfg->val('GLOBAL','exclude_region_file'),
+		tss_extension => $cfg->val('GLOBAL','tss_extension'),
+		gt_dir=> $cfg->val($dataset,'gt_dir'),
+		#test_set=>$cfg->val('GLOBAL','test_set'),
+		#ref_set=>$cfg->val('GLOBAL','ref_set'),
+		filter=>$cfg->val('GLOBAL','filter'),
+		perm_number=>$cfg->val('GLOBAL','perm_number'),
+		sigma_index=>$cfg->val('GLOBAL','sigma_index'),
+		perm_dir=>$cfg->val($dataset,'precomp_perm_dir')
+		
 	);
+	#die(Dumper(\%targs));
 	
-	## set up analysis
+	## set up analysis                       
 	my %analysis;
 	foreach my $al($cfg->val('GLOBAL','analysis')){
 		my ($tname,$test,$ref)=split(/\s+/,$al);
@@ -258,7 +264,9 @@ sub analyse_dataset{
 	}
 	## STEP 1: SETUP
 	
-	
+	## if the user has defined perm_dir then skip sigma
+	$SKIP_STEP{sigma}=1 if $targs{perm_dir};
+
 	
 	my $dirs = make_support_dir($targs{base_dir}.$targs{datasource_name},0);
 	
@@ -290,9 +298,10 @@ sub analyse_dataset{
 	my $rhash;
 	my $sigdotfile = $dirs->{SIGMA}."/.sigma";
 	my $run_sigma = 1;
-	if(-e $sigdotfile && !$FORCE_STEP{sigma}){
+	if(-e $sigdotfile && !$FORCE_STEP{sigma} && !$SKIP_STEP{sigma}){
 		$run_sigma = 0 unless yesno("sigma files found do you wish to recompute?");
 	}	
+	$run_sigma = 0 if $SKIP_STEP{sigma};
 	if($run_sigma){
     ##check as to whether we should use pregenerated sigmas
     if($targs{sigma_index}){
@@ -332,37 +341,52 @@ sub analyse_dataset{
 	
 	## STEP 3a: COMPUTE PERMS
 	
-	## read in sigma .file
-	open(SIG, $sigdotfile) || die "Cannot find sigma dot file $sigdotfile\n";
-	my @plist;
-	while(<SIG>){
-		chomp;
-		my($sfile,$sigfile) = split("\t",$_);
-		my %hash = (snpfile=>$sfile,
-								sigmafile=>$sigfile);
-		push @plist,\%hash;
-	}
-	close(SIG);
-	
 	my $permsdotfile = $dirs->{PERMS}."/.perms";
 	my $run_perms = 1;
 	if(-e $permsdotfile && !$FORCE_STEP{perms}){
 		$run_perms = 0 unless yesno("perm files found do you wish to recompute?");
 	}
 	if($run_perms){
-		## clear up
 		if(-d $dirs->{PERMS}){
 			## clear up first
 			remove_tree(($dirs->{PERMS},$dirs->{TPERMS}),{keep_root => 1,result=> \my $del_dirs});
 			debug(join("\n",@$del_dirs));
 		}
+		## read in sigma .file
+		my @jids;
+		if($targs{perm_dir}){
+			## use precomputed perms !
+			my $jids = retrieve_perms($snp_file,
+				$dirs->{SSNP},
+				$targs{perm_dir},
+				$targs{perm_number},
+				$dirs->{TPERMS},
+				$dirs->{LOG});
+			##think perhaps we should chuck an error !
+			return if !@$jids;
+			@jids=@$jids;
+		}else{
+			open(SIG, $sigdotfile) || die "Cannot find sigma dot file $sigdotfile\n";
+			my @plist;
+			while(<SIG>){
+				chomp;
+				my($sfile,$sigfile) = split("\t",$_);
+				my %hash = (snpfile=>$sfile,
+										sigmafile=>$sigfile);
+				push @plist,\%hash;
+			}
+			close(SIG);
+			## clear up
+		
 	
-		my $csize = ceil($targs{perm_number}/$GLOBALS{SM}{default_perm_per_chunk});
-		## $csize should be 1 if $DEFAULT_PERM_PER_CHUNK > perm_number
-		my $rhash = compute_perms(\@plist,$dirs->{TPERMS},
-				$GLOBALS{SM}{default_perm_per_chunk},$dirs->{LOG},$csize);
-		my @jids = keys(%$rhash);
-		return if !@jids;
+			my $csize = ceil($targs{perm_number}/$GLOBALS{SM}{default_perm_per_chunk});
+			## $csize should be 1 if $DEFAULT_PERM_PER_CHUNK > perm_number
+			my $rhash = compute_perms(\@plist,$dirs->{TPERMS},
+					$GLOBALS{SM}{default_perm_per_chunk},$dirs->{LOG},$csize);
+			my @jids = keys(%$rhash);
+			return if !@jids;
+		
+		}
 		do{sleep($GLOBALS{SM}{q_poll_time})} until check_task_finished(\@jids);
 		my $outfiles = collapse_perms($dirs->{TPERMS},$dirs->{PERMS},$dirs->{LOG});
 		open(SIG,">$permsdotfile") || die "Cannot open perms dot file: $permsdotfile\n";
@@ -647,7 +671,6 @@ sub collapse_perms{
 	return \@outfiles;
 }
 	
-	
  
 ## TODO unlink tmp files 
 
@@ -787,8 +810,38 @@ REND
   #`$cmd`; 
   return(dispatch_Rscript($cmd,"$logdir/compute_w"));
   #unlink($fname) unless $GLOBALS{SM}{keep_tmp_files};  
-}  
+} 
 
+
+sub retrieve_perms{
+	my($snp_file,$scratch_dir,$perm_in_dir,$perm_number,$perm_tmp,$log_dir)=@_;
+	my @jids;
+	if($GLOBALS{SM}{use_q}){
+		#we blow away contents of scratch_dir each time
+    remove_tree($scratch_dir,{keep_root => 1,result=> \my $del_dirs});
+    debug(join("\n",@$del_dirs));
+    my $jid = prepare_snps_for_q($scratch_dir,$snp_file,$log_dir);
+    do{sleep($GLOBALS{SM}{q_poll_time})} until check_task_finished([$jid]);
+    find(sub{
+    		debug($_);
+    		if(/\.RData$/){
+    			my $cmd = "$GLOBALS{SM}{rscript} $RSCRIPTS{retrieve_perms} snp.file=\\'$File::Find::name\\' ";
+    			$cmd.="perm.dir=\\'$perm_in_dir\\' out.dir=\\'$perm_tmp\\' n.perms=$perm_number";
+    			debug($cmd);
+    			my $jid = dispatch_Rscript($cmd,"$log_dir/retrieve_perms");
+    			push @jids,$jid;
+    		}
+    },$scratch_dir);
+  }else{
+  	##non q based and untested
+  	my $cmd = "$GLOBALS{SM}{rscript} $RSCRIPTS{retrieve_perms} snp.file=\\'$snp_file\\' ";
+  	$cmd.="perm.dir=\\'$perm_in_dir\\' out.dir=\\'$perm_tmp\\' n.perms=$perm_number";
+  	debug($cmd);
+  	dispatch_Rscript($cmd,"$log_dir/retrieve_perms");
+  }
+  return \@jids;
+}
+  	#push @jids,$jid;
 ## for a given snp file and matching sigma file
 ## create a matrix of perms that we can use to
 ## compute Wstar

@@ -15,8 +15,10 @@ sigma_index=
 gt_dir=
 pval_file=
 snp_catalog=
+perm_dir=
 
 [DATASET ds2]
 gt_dir=
 pval_file=
 snp_catalog=
+perm_dir=
