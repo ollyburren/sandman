@@ -9,9 +9,11 @@ use strict;
 
 =head1 DESCRIPTION
 
-=head1 AUTHOR
+=head1 AUTHORa
+ Olly Burren
 
 =head1 BUGS
+ Results on intial run don't print properly
 
 =cut
 
@@ -31,8 +33,8 @@ use Config::IniFiles;
 
 use vars(qw/
 	%DIRS $GRID_SCRATCH $SNP_CATALOGUE $MART_HOST
-	%RSCRIPTS %MAND_PARAM %DEFAULT_PARAM $SANDMAN_ROOT $BASE_DIR
-	%SKIP_STEP
+	%RSCRIPTS %MAND_PARAM %DEFAULT_PARAM $SANDMAN_ROOT 
+  $BASE_DIR %SKIP_STEP
 	/);
 
 %RSCRIPTS=(
@@ -82,7 +84,7 @@ if(! $SANDMAN_ROOT){
 	TSNP=>'scratch/snps',
 	SSNP=>'scratch/split_snps',
 	TPERMS=>'scratch/perms',
-	SIGMA=>'sigma', ## change this to use scratch/sigma as more logical
+	SIGMA=>'/scratch/sigma', 
 	WSTAR=>'wstar',
 	LOG=>'log',
 	PERMS=>'perms',
@@ -100,17 +102,11 @@ if(!-e $bs_sandman_file){
 my %GLOBALS;
 my $sm_cnf = tie %GLOBALS,'Config::IniFiles',(-file=>$bs_sandman_file); 
 
-
-
-
-
 $SNP_CATALOGUE=$GLOBALS{SM}{default_snp_catalogue}; # probably make this web enabled
 
 ## TODO think about rewriting so that biomart is not always need (i.e. keep gene locs in
 ## bed file ?
 $MART_HOST=$GLOBALS{SM}{default_mart_host}; ## can be overidden by analysis cnf
-
-
 
 ##SETUP R SCRIPT PATH
 foreach my $k(keys %RSCRIPTS){
@@ -184,9 +180,6 @@ foreach my $ds ($cfg->GroupMembers('DATASET')){
 	$ds_params{$ds}=analyse_dataset($cfg,$ds);
 }
 
-## for testing 
-
-
 
 ## final computation of Z scores combines results from both datasets and is separate
 
@@ -220,6 +213,9 @@ print_results($BASE_DIR);
 
 exit(1);
 
+################
+##SUBROUTINES  #
+################
 
 sub analyse_dataset{
 	my ($cfg,$dataset)=@_;
@@ -477,7 +473,6 @@ sub analyse_dataset{
 	return \%wparams;	
 }
 
-## SUBROUTINES  
 
 sub consolidate_wstar{    
 	my ($wdir,$outfile,$log_dir) = @_;

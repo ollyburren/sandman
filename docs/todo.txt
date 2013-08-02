@@ -1,0 +1,10 @@
+TODO (In no particular order)
+
+Allow snp support and tabix to run on the queue. 
+Better option handling through Getopt::Long
+Tidy up and document miscFuntions.R
+Make consolidation of Wstar and computation of W more batch friendly
+Add better function documentation main perl script and decruft code.
+Allow users to add own snpCatalogs in pseudo bed format with boolean fields to allow filtering on precomputed LD
+Allow region based analysis rather than gene-based.
+Beef up support scripts etc and documentation.

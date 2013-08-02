@@ -1,0 +1,123 @@
+SETUP
+
+#1
+
+Create a .sandman.cnf file that should be available in the dir containing your installation. See template in ./cnf directory
+
+[SM]
+## command to use to submit 
+qsub=qsub -q <QNAME> -v R_LIBS=<RLIBS_DIR>
+## location of Rscript
+rscript=/usr/bin/Rscript
+## whether to use SGE (untested without).
+use_q=1
+## If set to 1 tmp files are retained (useful for debug).
+## set to 0 if you are tidy or bothered about disk space.
+keep_tmp_files=1
+## dir to use for grid scratch space (note must be available
+## to queue hosts if use_q=1)
+grid_scratch=
+## How often to poll queue to see if dependent jobs finished
+q_poll_time=5
+## tabix location
+tabix_bin=tabix
+## location of tabix compatible snp catalogue file
+default_snp_catalogue=#http at some stage
+## max regions to search at a time
+tabix_chunksize=100
+## ensmart default host
+default_mart_host=www.ensembl.org
+## Number of perms to process in a chunk
+default_perm_per_chunk=1000
+
+#2 configure an experiment.cnf see template in ./cnf directory
+
+[GLOBAL]
+## location for analysis to take place (created if ! exists)
+base_dir =
+## path to a geneset file (see below)
+geneset_file = 
+## path to exclude regions file (see below)
+exclude_region_file = $SANDMAN/mhc.tab
+## If doing gene based analysis bp to extend around 
+## transcriptional start site.
+tss_extension = 200000
+## custom filter for snps (see below)
+filter=!snps.gr$mhc
+## number of permutations to use
+perm_number=1000
+## analysis configuration (see below)
+analysis=<<ANALYSIS
+analysis1 SET.test SET.ref
+ANALYSIS
+## override value in .sandman.cnf
+mart_host=www.ensembl.org
+## OPTIONAL: if set then use precomputed sigma's to
+## generate permutations.
+sigma_index=
+
+## Need at least one dataset
+[DATASET ds1]
+## OPTIONAL: location of genotypes in snpMatrix/snpStats format.
+## (see below). If set then sigma is generated based on
+## control genotype LD/gene. Be careful using this for 
+## very dense snp maps and non gene based region analysis.
+## It will rapidly fill your disk!
+gt_dir=
+## Location of summary p.vals for GWAS
+pval_file=
+## not yet implemented
+snp_catalog=
+## OPTIONAL: location of pregenerated permutations 
+## (such as through cc permutation and genotypes)
+perm_dir=
+
+[DATASET ds2]
+gt_dir=
+pval_file=
+snp_catalog=
+perm_dir=
+
+GENESET FILE
+
+Has format where there should be at least one test set
+and one control set.
+
+ENSEMBLID\s+SET
+
+e.g.
+
+ENSG00000134242 test
+ENSG00000334237 control
+
+EXCLUDE FILE 
+
+A file that allows us to exclude various locations in the
+genome e.g. MHC. Just define using bed format.
+
+e.g.
+
+chr1 12456 4567 excluded_region
+
+PVAL FILE 
+
+Currently pval file format is just rs\s+p.val
+
+e.g
+
+rs123 0.004
+
+ANALYSIS FILE FORMAT
+
+This should correspond to the gene sets defined in GENESET FILE.
+Add a prefix of SET. 
+
+e.g.
+
+mytest SET.test SET.control
+
+#3 run ./sandman.pl myexperiment.cnf
+
+NB: Analysis is carried out in a modular way. As such it's worth debugging an analysis on a small number of perms, and then rerunning with this cranked up. The software will prompt to see if you wish to keep previous files already generated.
+
+Results will be output to base_dir/results.tab

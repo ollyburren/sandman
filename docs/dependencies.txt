@@ -1,0 +1,31 @@
+DEPENDENCIES
+
+Developed on Ubuntu 12.04.2 LTS
+
+perl 5.14.2
+
+  CPAN
+
+    Config::IniFiles
+    Term::ReadKey
+    Data::Dumper - For debugging
+
+
+R 3.0.1
+
+  CRAN
+   wgsea
+   corpcor
+   mvtnorm
+
+  Bioconductor
+
+   snpStats
+   GenomicRanges
+   biomaRt
+   VariantAnnotation (optional for building SIGMA based on custom VCF)
+
+Sun Grid Engine 6.2u5
+
+  qsub
+  qstat
