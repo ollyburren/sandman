@@ -379,7 +379,8 @@ sub analyse_dataset{
 			## $csize should be 1 if $DEFAULT_PERM_PER_CHUNK > perm_number
 			my $rhash = compute_perms(\@plist,$dirs->{TPERMS},
 					$GLOBALS{SM}{default_perm_per_chunk},$dirs->{LOG},$csize);
-			my @jids = keys(%$rhash);
+			#die(Dumper($rhash));
+			@jids = keys %$rhash;
 			return if !@jids;
 		
 		}
@@ -853,7 +854,7 @@ sub compute_perms{
     	for(my $x=1;$x<=$chunksize;$x++){
     		my $out_file = $permdir.'/'.basename($snpfile,'.RData').".perms.$x.RData";
       	#my $cmd = "$RSCRIPT ${RSCRIPT_DIR}compute_mvs_perms.R snp.file=\\'$snpfile\\' ";
-  	my $cmd = "$GLOBALS{SM}{rscript} $RSCRIPTS{compute_mvs_perms} snp.file=\\'$snpfile\\' ";
+      	my $cmd = "$GLOBALS{SM}{rscript} $RSCRIPTS{compute_mvs_perms} snp.file=\\'$snpfile\\' ";
       	$cmd.= "sigma.file=\\'$sigmafile\\' out.file=\\'$out_file\\' n.perms=$number_perms misc.functions=\\'$RSCRIPTS{misc_functions}\\'";
       	debug($cmd);
       	my $jid = dispatch_Rscript($cmd,"$log_dir/compute_perms");

@@ -451,9 +451,9 @@ retrieve_sigma<-function(index.gr,snps.gr){
   		assign('sigma',get(load(x)))
   		index<-which(rownames(sigma) %in% snp.list)
   		if(length(index)==0 ){
-  			ol.snps<-subsetByOverlaps(snps.gr,t)$name
+  			#ol.snps<-subsetByOverlaps(snps.gr,index.gr)$name
   			print("WARNING: Expecting some SNPs but none found, list of SNPs missing:")
-  			print(ol.snps)
+  			#print(ol.snps)
   			return(NA)
   		}
   		if(length(index)==1){
