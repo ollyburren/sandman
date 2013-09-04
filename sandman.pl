@@ -9,11 +9,11 @@ use strict;
 
 =head1 DESCRIPTION
 
-=head1 AUTHORa
+=head1 AUTHOR
  Olly Burren
 
 =head1 BUGS
- Results on intial run don't print properly
+ Non-autosomal genes/regions are currently ignored, when retrieving sigma 
 
 =cut
 
@@ -38,6 +38,9 @@ use vars(qw/
 	/);
 
 %RSCRIPTS=(
+	lookup_snps => 'lookup_snps.R',
+	create_gene_files => 'create_gene_gr.R',
+	create_region_files => 'create_region_gr.R',
 	create_support_files=>'create_support_files.R',
 	compute_sigma=>'compute_sigma.R',
 	retrieve_sigma=>'retrieve_sigma.R',
@@ -77,10 +80,12 @@ if(! $SANDMAN_ROOT){
 		perm_number=>10000
 	});
 	
-	
+
+## Relative dir paths for support and temp files
 
 %DIRS=(
-	SCRATCH=>'scratch',
+	SCRATCH=>'scratch', 
+	GR=>'scratch/gen_ranges', 
 	TSNP=>'scratch/snps',
 	SSNP=>'scratch/split_snps',
 	TPERMS=>'scratch/perms',
@@ -198,15 +203,17 @@ foreach my $ds (keys %ds_params){
 #die(Dumper(%zparams));
 
 
-
+my @jids;
 foreach my $analysis(keys %zparams){
 		my $resoutfile = "$BASE_DIR/$analysis.Z.RData";
-		compute_Z($zparams{$analysis}{wfile},
+		my $jid = compute_Z($zparams{$analysis}{wfile},
 			$zparams{$analysis}{wstarfile},
 			$resoutfile,$BASE_DIR."/$DIRS{LOG}"
 			);
+		push @jids,$jid;
 }
-
+do{sleep($GLOBALS{SM}{q_poll_time})} until check_task_finished(\@jids);
+sleep(5); ## let FS catch up
 print_results($BASE_DIR);
 
 
@@ -216,6 +223,16 @@ exit(1);
 ################
 ##SUBROUTINES  #
 ################
+
+=head2 analyse_dataset
+
+ NAME: analyse_dataset
+ ARGS: Config::IniFiles object, SCALAR[STRING] 
+ FUNCTION: Manages the analysis of a dataset
+ RETURNS : A hashref, wfile - R data object to w score, 
+ 	wstarfile - R data object to permuted w score
+
+=cut
 
 sub analyse_dataset{
 	my ($cfg,$dataset)=@_;
@@ -233,12 +250,13 @@ sub analyse_dataset{
 		
 	(my $DS_NAME = $dataset) =~ s/DATASET\s+//;
 	
-	##for ease !!
+	##for ease add these to a hash within available to subroutine
 	my %targs = (
 		base_dir=> $cfg->val('GLOBAL','base_dir').'/',
 		pval_file => $cfg->val($dataset,'pval_file'),
 		datasource_name => $DS_NAME,
-		geneset_file => $cfg->val('GLOBAL','geneset_file'),     
+		geneset_file => $cfg->val('GLOBAL','geneset_file'),
+		regionset_file => $cfg->val('GLOBAL','regionset_file'),
 		exclude_region_file => $cfg->val('GLOBAL','exclude_region_file'),
 		tss_extension => $cfg->val('GLOBAL','tss_extension'),
 		gt_dir=> $cfg->val($dataset,'gt_dir'),
@@ -247,9 +265,11 @@ sub analyse_dataset{
 		filter=>$cfg->val('GLOBAL','filter'),
 		perm_number=>$cfg->val('GLOBAL','perm_number'),
 		sigma_index=>$cfg->val('GLOBAL','sigma_index'),
-		perm_dir=>$cfg->val($dataset,'precomp_perm_dir')
+		perm_dir=>$cfg->val($dataset,'precomp_perm_dir'),
+		full_sigma=>$cfg->val('GLOBAL','full_sigma')
 		
 	);
+	
 	#die(Dumper(\%targs));
 	
 	## set up analysis                       
@@ -260,13 +280,18 @@ sub analyse_dataset{
 	}
 	## STEP 1: SETUP
 	
-	## if the user has defined perm_dir then skip sigma
-	$SKIP_STEP{sigma}=1 if $targs{perm_dir};
-
 	
+	
+	## if the user has defined perm_dir then skip sigma
+	
+	$SKIP_STEP{sigma}=1 if $targs{perm_dir};
+	
+	## if the user has defined a regions_file then use alternative method
+	## to create support file
+
 	my $dirs = make_support_dir($targs{base_dir}.$targs{datasource_name},0);
 	
-	##next make snp support files
+	## next make snp support files if required
 	
 	my $snp_file = $dirs->{'TSNP'}.'/snp.gr.RData';
 	my $run_support = 1;
@@ -274,22 +299,61 @@ sub analyse_dataset{
 		$run_support = 0 unless yesno("support files found do you wish to overwrite?");
 	}
 	
-	if($run_support){ 
-		debug("Generating support files $snp_file");
-		my @jids = make_support_files(
-			$targs{'pval_file'},
-			$targs{'geneset_file'},
-			$snp_file,
-			$targs{'exclude_region_file'},
-			$GLOBALS{SM}{tabix_bin},$SNP_CATALOGUE,$GLOBALS{SM}{tabix_chunksize},
-			$MART_HOST,$targs{tss_extension},
-			$dirs->{LOG});
-		do{sleep($GLOBALS{SM}{q_poll_time})} until check_task_finished(\@jids);
-		## automatically recompute sigmas
-		$FORCE_STEP{sigma}=1;
-	}
-	## STEP 2: COMPUTE SIGMA'S
 	
+	## 1a create support file if required based on genes
+	if($run_support){ 
+		my @jids;
+		if(-e $targs{'geneset_file'}){
+			debug("FOUND GENESET creating GenomicRanges");
+			@jids = create_gene_files(
+				$targs{'geneset_file'},
+				$dirs->{GR},
+				$GLOBALS{SM}{tabix_chunksize},
+				$MART_HOST,$targs{tss_extension},
+				$dirs->{LOG});
+		}elsif(-e $targs{'regionset_file'}){ ## 1b or based on regions
+			debug("FOUND REGIONSET creating GenomicRanges");
+				@jids = create_region_files(
+					$targs{'regionset_file'},
+					$dirs->{GR},
+					$dirs->{LOG});
+		}
+		do{sleep($GLOBALS{SM}{q_poll_time})} until check_task_finished(\@jids);
+		
+		## using defined catalog assign positional locations for snps
+		## in submitted pvalue file.
+		
+		my $jids = run_lookup_snps(
+			$targs{'pval_file'},
+			$dirs->{GR},
+			$dirs->{TSNP},
+			$targs{'exclude_region_file'},
+			$GLOBALS{SM}{tabix_bin},$SNP_CATALOGUE,
+			$dirs->{LOG});
+		do{sleep($GLOBALS{SM}{q_poll_time})} until check_task_finished($jids);
+		my @jids = consollidate_snps($dirs->{TSNP},$snp_file,$dirs->{LOG});
+		do{sleep($GLOBALS{SM}{q_poll_time})} until check_task_finished(\@jids);
+		$FORCE_STEP{sigma}=1;
+}
+
+## if we want to run efficiently w/o q then we need to reinstate this code !!
+
+#	if($run_support){ 
+#		debug("Generating support files $snp_file");
+#		my @jids = make_support_files(
+#			$targs{'pval_file'},
+#			$targs{'geneset_file'},
+#			$snp_file,
+#			$targs{'exclude_region_file'},
+#			$GLOBALS{SM}{tabix_bin},$SNP_CATALOGUE,$GLOBALS{SM}{tabix_chunksize},
+#			$MART_HOST,$targs{tss_extension},
+#			$dirs->{LOG});
+#		do{sleep($GLOBALS{SM}{q_poll_time})} until check_task_finished(\@jids);
+#		## automatically recompute sigmas
+#		$FORCE_STEP{sigma}=1;
+#	}
+
+	## STEP 2: COMPUTE SIGMA'S these are used for the multivariate sampling.
 	
 	my $rhash;
 	my $sigdotfile = $dirs->{SIGMA}."/.sigma";
@@ -307,6 +371,8 @@ sub analyse_dataset{
         $dirs->{SIGMA},
         $targs{sigma_index},
         $dirs->{SSNP},
+        $targs{gt_dir},
+        $targs{full_sigma},
         $dirs->{LOG});
     }else{
       if(!-d $targs{gt_dir}){
@@ -351,7 +417,7 @@ sub analyse_dataset{
 		## read in sigma .file
 		my @jids;
 		if($targs{perm_dir}){
-			## use precomputed perms !
+			## use precomputed perms i.e from permuting genotypes in case/control
 			my $jids = retrieve_perms($snp_file,
 				$dirs->{SSNP},
 				$targs{perm_dir},
@@ -361,7 +427,7 @@ sub analyse_dataset{
 			##think perhaps we should chuck an error !
 			return if !@$jids;
 			@jids=@$jids;
-		}else{
+		}else{ ## generate perms 
 			open(SIG, $sigdotfile) || die "Cannot find sigma dot file $sigdotfile\n";
 			my @plist;
 			while(<SIG>){
@@ -378,7 +444,7 @@ sub analyse_dataset{
 			my $csize = ceil($targs{perm_number}/$GLOBALS{SM}{default_perm_per_chunk});
 			## $csize should be 1 if $DEFAULT_PERM_PER_CHUNK > perm_number
 			my $rhash = compute_perms(\@plist,$dirs->{TPERMS},
-					$GLOBALS{SM}{default_perm_per_chunk},$dirs->{LOG},$csize);
+					$GLOBALS{SM}{default_perm_per_chunk},$targs{full_sigma},$dirs->{LOG},$csize);
 			#die(Dumper($rhash));
 			@jids = keys %$rhash;
 			return if !@jids;
@@ -398,7 +464,7 @@ sub analyse_dataset{
 	
 	## STEP 3b: CHECK PERMS
 	
-	#check the perms created and create missing snps list if the snpfile and perm rownames lists
+	#check the perms are created and create missing snps list if the snpfile and perm rownames lists
 	#are not the same
 	my $check_permsdotfile = $dirs->{PERMS}."/.checked";
 	#die( $check_permsdotfile);
@@ -421,7 +487,7 @@ sub analyse_dataset{
 	}
 	
 	
-	##STEP 4: COMPUTE WSTARS FOR PERMS
+	##STEP 4: COMPUTE W FOR PERMS
 	my @wstar_jids;
 	my %wparams;
 	foreach my $al(keys %analysis){
@@ -474,6 +540,17 @@ sub analyse_dataset{
 	return \%wparams;	
 }
 
+=head2 consolidate_wstar
+
+ NAME: consolidate_wstar
+ ARGS: SCALAR[wdir] - path to a dir of permuted wilcoxon statistics.
+ 	SCALAR[outfile] - path to a location for output file.
+ 	SCALAR[log_dir] - path to dir of log files
+ FUNCTION: Consolidates a set of Wilcoxon statistics split over multiple 
+ 	files into one file.
+ RETURNS : A jobid if program called in queue context.
+
+=cut
 
 sub consolidate_wstar{    
 	my ($wdir,$outfile,$log_dir) = @_;
@@ -493,6 +570,18 @@ REND
   #`$cmd`;                                   
   #unlink($fname) unless $GLOBALS{SM}{keep_tmp_files};    
 }
+
+=head2 compute_Z
+
+ NAME: compute_Z
+ ARGS: ARRAYREF[wfiles] - list of paths to wilcoxon statistics for each dataset,
+ 	ARRAYREF[wstarfiles] - list of paths to permuted wilcoxon statistics for each dataset,
+ 	SCALAR[outfile] - path to a location for output file.
+ 	SCALAR[log_dir] - path to dir of log files
+ FUNCTION: Computes Z score for a set of datasets given computed wilcoxon and permuted wilcoxon scores
+ RETURNS : A jobid if program called in queue context.
+
+=cut
 
 sub compute_Z{
 	# need Wstar, W (i.e.pvals) and snpnames in and snpnames out for each dataset
@@ -522,7 +611,16 @@ REND
   #unlink($fname) unless $GLOBALS{SM}{keep_tmp_files};    
 }
 	
-	
+=head2 make_support_dir
+
+ NAME: make_support_dir
+ ARGS: SCALAR[dir] - dir path to create,
+ 	SCALAR[force] - If top level dir already exists whether to remove it and recreate (data lost) w/o 
+ 		interactive prompt.
+ FUNCTION: Safely create a set of dirs.
+ RETURNS : HASHREF - set of dirs created.
+
+=cut	
 
 
 sub make_support_dir{
@@ -553,6 +651,64 @@ sub make_support_dir{
 ## TODO MAKE THIS COMPATIBLE WITH RUNNING ON THE Q ?
 ## AS FOR LOTS OF GENES THIS BIT WILL BE SLOW.
 
+=head2 create_gene_files
+
+ NAME: create_gene_files
+ ARGS:  	SCALAR[genefile] - path to input gene file see docs for format
+ 	SCALAR[outdir] - path to where output should be written
+ 	SCALAR[tabix_chunksize] - Integer size (# of genes) for chunking SNP retrieval
+ 	SCALAR[mart_host] - biomart host to use see defaults.
+ 	SCALAR[tss_extension] - Integer for extension for region surrounding  5' TSS see docs.
+ 	SCALAR[log_dir] - path to dir of log files
+ FUNCTION: Safely create a set of dirs.
+ RETURNS : HASHREF - set of dirs created.
+
+=cut	
+
+sub create_gene_files{
+	my ($genefile,$outdir,$tabix_chunksize,
+			$mart_host,$tss_extension,$log_dir)=@_;
+	my $cmd = "$GLOBALS{SM}{rscript} $RSCRIPTS{create_gene_files}  misc.functions=\\'$RSCRIPTS{misc_functions}\\' ";
+	$cmd.= "gene.file=\\'$genefile\\' ";
+	$cmd.= "out.dir=\\'$outdir\\' ";
+	$cmd.= "chunksize=$tabix_chunksize ";
+	$cmd.= "mart_host=\\'$mart_host\\' tss.extension=$tss_extension";
+	return(dispatch_Rscript($cmd,"$log_dir/create_gene_files"));
+}
+
+sub create_region_files{
+	my ($regionfile,$outdir,$log_dir)=@_;
+	my $cmd = "$GLOBALS{SM}{rscript} $RSCRIPTS{create_region_files} ";
+	$cmd.= "region.file=\\'$regionfile\\' ";
+	$cmd.= "out.dir=\\'$outdir\\' ";
+	return(dispatch_Rscript($cmd,"$log_dir/create_region_files"));
+}
+
+=head2 make_support_files
+
+ NAME: make_support_files [DEPRECATED]
+ ARGS: SCALAR[snpfile] - path to GRanges formatted snpfile,
+ 	SCALAR[genefile] - path to input gene file see docs for format
+ 	SCALAR[outfile] - path to where output should be written
+ 	SCALAR[exclfile] - path to list of regions to exclude see docs for format
+ 	SCALAR[tabix] - path to tabix binary see docs
+ 	SCALAR[snpcat] - path to tabix indexed snp catalogue file
+ 	SCALAR[tabix_chunksize] - Integer size (# of genes) for chunking SNP retrieval
+ 	SCALAR[mart_host] - biomart host to use see defaults.
+ 	SCALAR[tss_extension] - Integer for extension for region surrounding  5' TSS see docs.
+ 	SCALAR[log_dir] - path to dir of log files
+ FUNCTION: Given a set of gene lists (see docs for format), routine uses biomart
+ 	to retrieve genomic intervals, these can be extended using the tss_extension parameter.
+ 	A catalogue of SNPs is then interrogated using tabix to obtain a set of SNPs that overlap
+ 	these intervals, information is then added as to which set each SNP belongs. This forms the
+ 	basis for future analysis.
+ RETURNS : SCALAR job_id if run in the context of queuing software.
+ 
+ NOTE: Currently this routine is deprecated as functionality is replaced by create_gene_files 
+ 	and create_region_files
+
+=cut	
+
 sub make_support_files{
 	my ($snpfile,$genefile,$outfile,
 			$exclfile,$tabix,$snpcat,
@@ -563,6 +719,24 @@ sub make_support_files{
 	$cmd.= "tabix.snp.catalogue.file=\\'$snpcat\\' chunksize=$tabix_chunksize ";
 	$cmd.= "mart_host=\\'$mart_host\\' tss.extension=$tss_extension";
 	return(dispatch_Rscript($cmd,"$log_dir/create_support_files"));
+}
+
+sub run_lookup_snps{
+		my ($snpfile,$regiondir,$outdir,
+			$exclfile,$tabix,$snpcat,$log_dir)=@_;
+		my @jids;
+		find(sub{
+				if(/chunk\.[0-9]+\.RData/){
+					my $cmd = "$GLOBALS{SM}{rscript} $RSCRIPTS{lookup_snps} misc.functions=\\'$RSCRIPTS{misc_functions}\\' ";
+					$cmd.= "region.file=\\'$File::Find::name\\' excl.file=\\'$exclfile\\' ";
+					$cmd.= "tabix.bin=\\'$tabix\\' ";
+					$cmd.= "tabix.snp.catalogue.file=\\'$snpcat\\' ";
+					$cmd.= "snp.file=\\'$snpfile\\' out.dir=\\'$outdir\\'";
+					my $jid = dispatch_Rscript($cmd,"$log_dir/lookup_snps");
+					push @jids,$jid;
+				}
+		},$regiondir);
+		return \@jids;
 }
 
 sub check_perms{
@@ -590,6 +764,29 @@ REND
   return(dispatch_Rscript($cmd,"$log_dir/check_perms"));
   #`$cmd`;                                   
   #unlink($fname) unless $GLOBALS{SM}{keep_tmp_files};    
+}
+
+sub consollidate_snps{
+	my ($snpdir,$snpfile,$logdir)=@_;
+	my ($fh,$fname) = &get_tmp_file($GLOBALS{SM}{grid_scratch});
+	my $R=<<REND;
+library(GenomicRanges)
+out.file<-'$snpfile'
+in.dir<-'$snpdir'
+sfiles<-list.files(path=in.dir,pattern="chunk.*",full.names=T)
+library(GenomicRanges)
+snps.gr<-unlist(GRangesList(lapply(sfiles,function(x){
+		get(load(x))
+		})
+))
+snps.gr<-snps.gr[!duplicated(snps.gr\$name),]
+save(snps.gr,file=out.file)
+REND
+  print $fh $R;
+  close($fh);
+  my $cmd = "$GLOBALS{SM}{rscript} --vanilla $fname";
+  return(dispatch_Rscript($cmd,"$logdir/consollidate_snps"));
+  #unlink($fname);
 }
 
        
@@ -671,7 +868,8 @@ sub collapse_perms{
 ## TODO unlink tmp files 
 
 sub retrieve_sigmas{
-  my ($snp_file,$sigma_dir,$sig_index,$scratch_dir,$log_dir)=@_;
+  my ($snp_file,$sigma_dir,$sig_index,$scratch_dir,$chrXgt_dir,$full_sigma,$log_dir)=@_;
+  $full_sigma = 1 if $full_sigma; ## incase they have used true or false
   my @jids;
   my %return;
   if($GLOBALS{SM}{use_q}){
@@ -684,9 +882,27 @@ sub retrieve_sigmas{
       debug($_);
       if(/\.RData$/){
         my $out_file = $sigma_dir.'/'.basename($_,'.RData').".sigma.RData";
-         my $cmd = "$GLOBALS{SM}{rscript} $RSCRIPTS{retrieve_sigma} snp.file=\\'$File::Find::name\\' ";
-        $cmd.= "sigma.index.file=\\'$sig_index\\' out.file=\\'$out_file\\' misc.functions=\\'$RSCRIPTS{misc_functions}\\'";
-        my $jid = dispatch_Rscript($cmd,"$log_dir/retrieve_sigma");
+        my $jid;
+        if(/chrX\.RData$/){
+        	if(! -e $chrXgt_dir){
+        		my $prompt=<<PROMPT;
+There are regions/genes in the analysis on chrX,but 1kg_gt_dir is either not set or does not exist	
+in experiment conf file. Type [y]es if you wish to continue with the analysis and ignore these regions.
+PROMPT
+						if(!yesno($prompt)){
+							exit(1);
+						}
+					}
+        	## this means we need to calculate some sigma's rather than retrieve
+        	my $cmd = "$GLOBALS{SM}{rscript} $RSCRIPTS{compute_sigma} snp.file=\\'$File::Find::name\\' ";
+        	$cmd.= "gt.dir=\\'$chrXgt_dir\\' out.file=\\'$out_file\\' misc.functions=\\'$RSCRIPTS{misc_functions}\\'";
+        	$jid = dispatch_Rscript($cmd,"$log_dir/calculate_sigma");
+        }else{
+        	my $cmd = "$GLOBALS{SM}{rscript} $RSCRIPTS{retrieve_sigma} snp.file=\\'$File::Find::name\\' ";
+        	$cmd.= "sigma.index.file=\\'$sig_index\\' out.file=\\'$out_file\\' misc.functions=\\'$RSCRIPTS{misc_functions}\\' ";
+        	$cmd.= "full.sigma=$full_sigma";
+        	$jid = dispatch_Rscript($cmd,"$log_dir/retrieve_sigma");
+        }
         debug("Running job $jid");
         ## create a hash of script params that we want to pass downstream
         $return{$jid}={
@@ -843,7 +1059,8 @@ sub retrieve_perms{
 ## compute Wstar
 	
 sub compute_perms{
-	my ($plist,$permdir,$number_perms,$log_dir,$chunksize)=@_;
+	my ($plist,$permdir,$number_perms,$full_sigma,$log_dir,$chunksize)=@_;
+	$full_sigma=1 if $full_sigma;
 	$chunksize=1 unless $chunksize; # in case it's not set;
 	my %return;
 	my @jids;
@@ -853,9 +1070,9 @@ sub compute_perms{
     	my $sigmafile = $phash->{sigmafile};
     	for(my $x=1;$x<=$chunksize;$x++){
     		my $out_file = $permdir.'/'.basename($snpfile,'.RData').".perms.$x.RData";
-      	#my $cmd = "$RSCRIPT ${RSCRIPT_DIR}compute_mvs_perms.R snp.file=\\'$snpfile\\' ";
       	my $cmd = "$GLOBALS{SM}{rscript} $RSCRIPTS{compute_mvs_perms} snp.file=\\'$snpfile\\' ";
-      	$cmd.= "sigma.file=\\'$sigmafile\\' out.file=\\'$out_file\\' n.perms=$number_perms misc.functions=\\'$RSCRIPTS{misc_functions}\\'";
+      	$cmd.= "sigma.file=\\'$sigmafile\\' out.file=\\'$out_file\\' n.perms=$number_perms misc.functions=\\'$RSCRIPTS{misc_functions}\\' ";
+      	$cmd.= "full.sigma=$full_sigma";
       	debug($cmd);
       	my $jid = dispatch_Rscript($cmd,"$log_dir/compute_perms");
       	debug("Running job $jid");
@@ -873,9 +1090,9 @@ sub compute_perms{
   	my $snpfile = @$plist[0]->{snpfile};
   	my $sigmafile = @$plist[0]->{sigmafile};
   	my $out_file = $permdir.'/1.perms.RData';
-  	#my $cmd = "$RSCRIPT ${RSCRIPT_DIR}compute_mvs_perms.R snp.file=\\'$snpfile\\' ";
   	my $cmd = "$GLOBALS{SM}{rscript} $RSCRIPTS{compute_mvs_perms} snp.file=\\'$snpfile\\' ";
-  	$cmd.= "sigma.file=\\'$sigmafile\\' out.file=\\'$out_file\\' n.perms=$number_perms";
+  	$cmd.= "sigma.file=\\'$sigmafile\\' out.file=\\'$out_file\\' n.perms=$number_perms ";
+  	$cmd.= "full.sigma=$full_sigma";
   	dispatch_Rscript($cmd,"$log_dir/compute_sigma");
   	$return{NOQ}={
   		permfile=>$out_file

@@ -35,8 +35,10 @@ default_perm_per_chunk=1000
 [GLOBAL]
 ## location for analysis to take place (created if ! exists)
 base_dir =
-## path to a geneset file (see below)
+## path to a geneset file (see below) MUTEX with regionset_file
 geneset_file = 
+## path to a regionset file (see below) MUTEX with geneset_file
+regionset_file
 ## path to exclude regions file (see below)
 exclude_region_file = $SANDMAN/mhc.tab
 ## If doing gene based analysis bp to extend around 
@@ -55,6 +57,12 @@ mart_host=www.ensembl.org
 ## OPTIONAL: if set then use precomputed sigma's to
 ## generate permutations.
 sigma_index=
+## if set to 1 then this means that all precomputed sigma's 
+## are used to generate perms, not just those overlapping
+## input snp list. Note that this better approximates LD
+## at a cost of speed. Consider setting to 1/true if you get
+## an interesting result having used default.
+full_sigma=0
 
 ## Need at least one dataset
 [DATASET ds1]
@@ -78,7 +86,7 @@ pval_file=
 snp_catalog=
 perm_dir=
 
-GENESET FILE
+GENESET FILE - Use if you have a list of genes
 
 Has format where there should be at least one test set
 and one control set.
@@ -89,6 +97,20 @@ e.g.
 
 ENSG00000134242 test
 ENSG00000334237 control
+
+REGIONSET FILE - Use if you have a list of genomic regions
+
+Pseudo BED format
+
+CHROMOSOME\tSTART\tEND\tSET\tREGION_NAME
+
+e.g. 
+
+chr5	102170285	102428220	test	sim1
+chr5	102428221	102686157	control	sim2
+
+NOTE that REGION_NAME is optional, if not specified then software assigns regions.
+NOTE that as it stands duplicated regions with different types have not yet been tested
 
 EXCLUDE FILE 
 

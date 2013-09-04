@@ -15,6 +15,11 @@ region.file
 snp.file
 excl.file
 out.dir
+## NOTE: For time being this is set as TRUE in future 
+## if no non-autosomal regions/genes are present could 
+## set to false so snps2gene does not have extra overhead
+## of adding names to each region/gene
+add.name<-TRUE
 
 snps<-read.table(file=snp.file,header=F,sep="\t")
 names(snps)<-c('name','pval')
@@ -67,7 +72,8 @@ snps.gr$name<-as.character(snps.gr$name)
 ## Here order is important ideally assign control sets before
 ## test sets perhaps add a new field to gene set file.
 
-snps.gr<-snps2gene(snps.gr,gr,add.gene=TRUE)
+
+snps.gr<-snps2gene(snps.gr,regions.gr,add.region.id=add.name)
 
 #next we save the file to our outfile
 

@@ -71,7 +71,7 @@ mvs.perm<-function(sigma,n=1000){
 	## this is slower than the choleski decomp ! Perhaps we should contact the author ?
 	rd<-rmvnorm(n,mean=rep(0,ncol(sigma)),sigma=sigma,method="chol")
 	# convert to chi.squared and transpose
-	rd<-rd^2
+	#rd<-rd^2
 	t(rd)
 }
 
@@ -198,29 +198,34 @@ createLogicalGRanges<-function(geneset.list,ensembl,tss.extension=NULL){
 	gr
 }
 
-snps2gene<-function(snp.gr,gene.gr,add.gene.id=FALSE){
-	if(!is(snp.gr,"GRanges") || !is(gene.gr,"GRanges"))
+snps2gene<-function(snp.gr,region.gr,add.region.id=FALSE){
+	if(!is(snp.gr,"GRanges") || !is(region.gr,"GRanges"))
 		stop("Both parameters are required to be GRanges objects")
 	#first step is to assign genenames to each snp
-	names.gr<-names(mcols(gene.gr))
+	names.gr<-names(mcols(region.gr))
 	tmp.mcols<-mcols(snp.gr)
 	for(r in names.gr[grep("^SET\\.",names.gr)]){
 		print(paste("Proceesing ",r))
-		index<-which(mcols(gene.gr)[[r]]==T)
-		t.gr<-subsetByOverlaps(snp.gr,gene.gr[index,])
+		index<-which(mcols(region.gr)[[r]]==T)
+		t.gr<-subsetByOverlaps(snp.gr,region.gr[index,])
 		tmp.mcols[[r]]<-tmp.mcols$name %in% t.gr$name
 	}
 	mcols(snp.gr)<-tmp.mcols
-	if(!add.gene.id){
+	if(!add.region.id){
 		
 		return(snp.gr)
 	}
 	
 	## add gene id's 	
 	
+	## if region.gr$name is not defined we make it up
 	
-	ol<-as.data.frame(findOverlaps(snp.gr,gene.gr))
-	ol$gene_id<-gene.gr[ol$subjectHits,]$names
+	if(length(region.gr$names)==0){
+		print("In here")
+		region.gr$names<-paste("region",1:length(region.gr),sep=".")
+	}
+	ol<-as.data.frame(findOverlaps(snp.gr,region.gr))
+	ol$region_id<-region.gr[ol$subjectHits,]$names
 	#what to do if a SNP overlaps two sets of genes
 	#here we just ignore it and take a first come first served.
 	#for some applications this could be problematic. Take the 
@@ -230,8 +235,8 @@ snps2gene<-function(snp.gr,gene.gr,add.gene.id=FALSE){
 	##only care about snps that overlap our test regions
 	snp.gr<-snp.gr[sort(nr$queryHits),]
 	tmp.mcols<-mcols(snp.gr)
-	tmp.mcols$gene_id<-character(length=length(snp.gr))
-	tmp.mcols$gene_id<-as.character(nr$gene_id)
+	tmp.mcols$region_id<-character(length=length(snp.gr))
+	tmp.mcols$region_id<-as.character(nr$region_id)
 	mcols(snp.gr)<-tmp.mcols
 	snp.gr
 }
@@ -257,7 +262,8 @@ generateSigmaGene<-function(snps.gr,gt.filepath){
 		fname<-gt.flist[[chr]]
 		objs<-load(fname)
 		assign('gt',get(objs[grep('control',objs)]))
-		tmp.grl<-split(snps.grl[[chr]],snps.grl[[chr]]$gene_id)
+		#tmp.grl<-split(snps.grl[[chr]],snps.grl[[chr]]$gene_id)
+		tmp.grl<-split(snps.grl[[chr]],snps.grl[[chr]]$region_id)
 		gene.results<-lapply(tmp.grl,function(x){
 			## snp out just the snps we are interested in
 			sindex<-which(colnames(gt) %in% x$name)
@@ -278,6 +284,8 @@ generateSigmaGene<-function(snps.gr,gt.filepath){
 	results
 }
 
+
+
 assignGTToFile<-function(chrs,path){
 	print(chrs)
 	if(!file.exists(path))
@@ -296,7 +304,7 @@ assignGTToFile<-function(chrs,path){
 	results
 }
 
-compute.mvs.perms<-function(sig.gene,n.perms){
+compute.mvs.perms_fast<-function(sig.gene,n.perms){
 	perms<-do.call("rbind",lapply(seq_along(sig.gene),function(i){
 	  mvs<-matrix()
 	  x<-sig.gene[[i]]
@@ -323,48 +331,34 @@ compute.mvs.perms<-function(sig.gene,n.perms){
   perms
 }
 
-## consider replacing some of below with that above (ATM there is a problem
-## with snps.gr vs snps.df which needs resolving in args list
-
-computeZ.input<-function(sig.gene,snps.df,test.colname,ctrl.colname,n.perms){
-					perms<-compute.mvs.perms(sig.gene,snps.df,n.perms)
-					## after testing remove the following as replaced with above function
-					#perms<-do.call("rbind",lapply(seq_along(sig.gene),function(i){
-					#	mvs<-matrix()
-					#	x<-sig.gene[[i]]
-					#	if(!is(x,"Matrix"))
-					#		return()
-					#	if(length(x)==1){
-					#		mvs<-t(as.matrix(exp(-rexp(n.perms))))
-					#	}else{
-          #		withCallingHandlers(mvs<-mvs.perm(as.matrix(x),n.perms),
-          #			 warning=function(w) {
-          #			 	print(paste("WARNING: mvs problem gene:",names(sig.gene)[i],"proably not positive definite trying again"))
-          #			 	x<-attempt.pos.def(x)
-          #			 	mvs.perm(as.matrix(x),n.perms)
-          #			 	#attempt to make positive definite
-          #			 	invokeRestart("muffleWarning")
-          #		 	}
-          #		)
-          #	}
-          #	rownames(mvs)<-rownames(x)
-          #	mvs
-        #}))
-        ## need to filter perms so that only include SNPs 
-        ## we need
-        all.snps<-which(rownames(perms) %in% snps.df$name)
-        perms<-perms[all.snps,]
-
-##next work out which are in and which are out
-        snps.in<-which(rownames(perms) %in% snps.df[snps.df[[test.colname]],]$name)
-
-        Wstar<-wilcoxon(perms,snps.in=snps.in)
-        snps.in<-which(snps.df[[test.colname]]==TRUE)
-        snps.out<-setdiff(which(snps.df[[ctrl.colname]]==TRUE),snps.in)
-        W<-wilcoxon(snps.df$p.val,snps.in=snps.in)
-        list(W=W,Wstar=Wstar,snps.in=snps.in,snps.out=snps.out)
+compute.mvs.perms_slow<-function(sig.gene,n.perms,snps.gr){
+	perms<-do.call("rbind",lapply(seq_along(sig.gene),function(i){
+	  mvs<-matrix()
+	  x<-sig.gene[[i]]
+	  if(!is(x,"Matrix"))
+	  	return()
+	  if(length(x)==1){
+	  	mvs<-t(as.matrix(exp(-rexp(n.perms))))
+	  }else{
+	  	withCallingHandlers(
+       mvs<-mvs.perm(as.matrix(x),n.perms),
+	  			warning=function(w) {
+	  				print(paste("WARNING: mvs problem gene:",names(sig.gene)[i],"proably not positive definite trying again"))
+	  				x<-attempt.pos.def(x)
+	  				mvs.perm(as.matrix(x),n.perms)
+	  				#attempt to make positive definite
+	  				invokeRestart("muffleWarning")
+	  			}
+			)
+    }
+    rownames(mvs)<-rownames(x)
+    ## filter here and return only those SNPs that we are interested in ?
+    index<-which(rownames(mvs) %in% snps.gr$name)
+    mvs[index,]
+  }))
+  ## is this needed ?
+  perms
 }
-
 
 
 compute.Wstar<-function(sig.gene,snps.gr,test.colname,ctrl.colname,n.perms){
@@ -428,9 +422,12 @@ runZ<-function(sigma,snps.gr,test.set,ctrl.set,n.perms){
 
 ## this routine takes a special index file and 
 ## a list of snps and then returns a list of 
-## corresponding sigma objects
+## corresponding sigma objects. Note
+## that the fast is achieved by prefiltering
+## sigma - this makes the downstream permutaion
+## generation step significantly faster.
 
-retrieve_sigma<-function(index.gr,snps.gr){
+retrieve_sigma_fast<-function(index.gr,snps.gr){
 	if(!is(snps.gr,"GRanges"))
 		stop("snp.gr parameter must be a GRanges object")
 	snps.grl<-split(snps.gr,seqnames(snps.gr))
@@ -449,6 +446,8 @@ retrieve_sigma<-function(index.gr,snps.gr){
 		}
 		retval<-lapply(ol.files,function(x){
   		assign('sigma',get(load(x)))
+  		## we cannot do this as messes up variance estimates 
+  		## see retrieve_sigma_no_filter
   		index<-which(rownames(sigma) %in% snp.list)
   		if(length(index)==0 ){
   			#ol.snps<-subsetByOverlaps(snps.gr,index.gr)$name
@@ -461,6 +460,52 @@ retrieve_sigma<-function(index.gr,snps.gr){
   			return(Matrix(1,dimnames = list(snp.name,snp.name)))
   		}
   			sigma[index,index]
+  	})
+  	##end for
+  	results[[chr]]<-unlist(retval)
+  }
+  results<-unlist(results)
+  results
+}
+
+## this version of the routine is much slower 
+## but more accurate. Envisage that as a first
+## pass run fast version to see if worth running
+## slow version
+
+retrieve_sigma_slow<-function(index.gr,snps.gr){
+	if(!is(snps.gr,"GRanges"))
+		stop("snp.gr parameter must be a GRanges object")
+	snps.grl<-split(snps.gr,seqnames(snps.gr))
+	## remove chromosomes with no genes
+	snps.grl<-snps.grl[which(sapply(snps.grl,length)>0)]
+	## remove non standard chromosomes
+	snps.grl<-snps.grl[grep("[0-9X]+",names(snps.grl))]
+	## narrow down to files
+	results<-list()
+	for(chr in names(snps.grl)){
+		snp.list<-snps.gr[seqnames(snps.gr)==chr,]$name
+		ol.files<-subsetByOverlaps(index.gr,snps.gr)$file
+		if(length(ol.files)==0){
+			print("No sigmas found for this chr found in index")
+			return();
+		}
+		retval<-lapply(ol.files,function(x){
+  		assign('sigma',get(load(x)))
+  		## we cannot do this as messes up variance estimates 
+  		## see retrieve_sigma_no_filter
+  		s.length<-length(rownames(sigma))
+  		if(s.length==0){
+  			#ol.snps<-subsetByOverlaps(snps.gr,index.gr)$name
+  			print("WARNING: Expecting some SNPs but none found, list of SNPs missing:")
+  			#print(ol.snps)
+  			return(NA)
+  		}
+  		if(s.length==1){
+  			snp.name<-colnames(sigma)
+  			return(Matrix(1,dimnames = list(snp.name,snp.name)))
+  		}
+  			sigma
   	})
   	##end for
   	results[[chr]]<-unlist(retval)
@@ -520,7 +565,7 @@ gen_perms_1kg<-function(index.gr,gene.gr,slist,n.perms,prefilter=TRUE){
         	s
         }
       })
-      compute.mvs.perms(sigma.list,n.perms)
+      compute.mvs.perms_fast(sigma.list,n.perms)
     })
     do.call("rbind",retval)
 }
