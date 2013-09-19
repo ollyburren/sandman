@@ -13,29 +13,35 @@ use strict;
  Olly Burren
 
 =head1 BUGS
- Non-autosomal genes/regions are currently ignored, when retrieving sigma 
 
 =cut
 
-## LIBS
-use File::Path qw/make_path remove_tree/;
-use File::Basename;
+## LIBS CORE
+
 use File::Find;
-use File::Temp qw/tempfile/;
-use POSIX qw/strftime ceil/;
-use Term::ReadKey;
 use Data::Dumper;
 use Cwd;
 use Config::IniFiles;
-#use Storable qw( store retrieve );
+
+## LIBS CUSTOM
+use FindBin;
+use lib "$FindBin::Bin/lib";
+use Sandman;
+use Sandman::Step;
+use Sandman::Step::Job;
+use Sandman::GRIDDriverFactory;
 
 ## GLOBALS
 
 use vars(qw/
 	%DIRS $GRID_SCRATCH $SNP_CATALOGUE $MART_HOST
 	%RSCRIPTS %MAND_PARAM %DEFAULT_PARAM $SANDMAN_ROOT 
-  $BASE_DIR %SKIP_STEP
+  $BASE_DIR %SKIP_STEP $DRIVER $RLIBS $DEBUG
 	/);
+
+###########
+## SETUP ##
+###########
 
 %RSCRIPTS=(
 	lookup_snps => 'lookup_snps.R',
@@ -49,6 +55,9 @@ use vars(qw/
   misc_functions=>'miscFunctions.R' ## these need a tidy
 );
 
+## Define parameters that have to be set and their types 
+## kind of out dated now we use ini files
+
 %MAND_PARAM=(
 	file=>{
 		GLOBAL=>['geneset_file'],
@@ -56,7 +65,6 @@ use vars(qw/
 	},
 	dir=>{
 		GLOBAL=>['base_dir'],
-		#DATASET=>['gt_dir'] ## currently MANDATORY as otherwise cannot compute SIGMA
 	},
 	array=>{
 		GLOBAL=>['analysis']
@@ -64,10 +72,9 @@ use vars(qw/
 
 $SANDMAN_ROOT = $ENV{SANDMAN};
 if(! $SANDMAN_ROOT){
-	debug("SANDMAN env not set using current working directory");
+	warn("SANDMAN env not set using current working directory");
 	$SANDMAN_ROOT = getcwd;
 }
-
 
 
 ## these things get filled in for you unless you overwrite them in cfg.
@@ -104,13 +111,22 @@ if(!-e $bs_sandman_file){
    die ("Cannot find .sandman.cnf file this is required to set installation variables\n") unless -e $bs_sandman_file;
 }
 
+## read in bootstrap config information
 my %GLOBALS;
-my $sm_cnf = tie %GLOBALS,'Config::IniFiles',(-file=>$bs_sandman_file); 
+my $sm_cnf = tie %GLOBALS,'Config::IniFiles',(-file=>$bs_sandman_file);
+
+$DEBUG = $GLOBALS{SM}{debug};
+
+$DRIVER = Sandman::GRIDDriverFactory->instantiate(
+	$GLOBALS{SM}{grid_driver},
+	inifile => $GLOBALS{SM}{grid_config_path});
+
+$RLIBS =  $GLOBALS{SM}{r_libs} || $ENV{R_LIBS};
 
 $SNP_CATALOGUE=$GLOBALS{SM}{default_snp_catalogue}; # probably make this web enabled
 
 ## TODO think about rewriting so that biomart is not always need (i.e. keep gene locs in
-## bed file ?
+## bed file ?)
 $MART_HOST=$GLOBALS{SM}{default_mart_host}; ## can be overidden by analysis cnf
 
 ##SETUP R SCRIPT PATH
@@ -119,15 +135,90 @@ foreach my $k(keys %RSCRIPTS){
 	if(-e $script_path){
 		$RSCRIPTS{$k}= $script_path;
 	}else{
-		debug("Cannot find $script_path check SANDMAN installation");                 
+		debug("Cannot find $script_path check SANDMAN installation",$DEBUG);                 
 		exit(1);
 	}
 }
 
+##
 
-## ARGUMENT PROCESSING
-## replace with formal get options logic
+##################
+## END OF SETUP ##
+##################
+
+########
+##MAIN##
+########
+
+## replace with formal get options logic such as GetOpt:Long
 my $inifile = shift;
+
+my %ds_params;
+my $cfg=parse_args($inifile);	 
+
+$BASE_DIR=$cfg->val('GLOBAL','base_dir').'/';
+
+if(-e "$BASE_DIR/results.tab"){
+	if(yesno("Already completed this analysis: show results and exit ?")){
+		print_results($BASE_DIR);
+		debug("## SUCCESS SEE $BASE_DIR",1);
+		exit(1);
+	}
+}
+
+foreach my $ds ($cfg->GroupMembers('DATASET')){
+	debug("## ANALYSING $ds",1);
+	$ds_params{$ds}=analyse_dataset($cfg,$ds);
+}
+
+## final computation of Z scores combines results from both datasets and is separate
+
+my %zparams;
+foreach my $ds (keys %ds_params){
+	my %a = %{$ds_params{$ds}};
+	foreach my $al(keys %a){
+		my %p = %{$a{$al}};
+		next unless $p{wfile}; ## need this or else cannot compute !
+		push @{$zparams{$al}{wstarfile}},$p{wstarfile};
+		push @{$zparams{$al}{wfile}},$p{wfile};
+	}
+}
+
+
+debug("## COMBINING STUDIES AND COMPUTING Z SCORES",1); 
+
+my $zstep = Sandman::Step->new(
+	logdir=>$BASE_DIR."/$DIRS{LOG}/compute_Z",
+	driver=>$DRIVER,
+	env_settings=>"R_LIBS=$RLIBS"
+	);
+foreach my $analysis(keys %zparams){
+	my $resoutfile = "$BASE_DIR/$analysis.Z.RData";
+	compute_Z($zparams{$analysis}{wfile},
+		$zparams{$analysis}{wstarfile},
+		$resoutfile,$zstep
+	);
+}
+do_step($zstep);
+sleep(5); ## let FS catch up
+print_results($BASE_DIR);
+
+## if we get here then it's useful to have a copy of any conf files used
+## so that we can reproduce analysis at a later date. 
+
+`cp $inifile $BASE_DIR`;
+`cp $bs_sandman_file $BASE_DIR`;
+
+debug("## SUCCESS SEE $BASE_DIR",1);
+
+exit(1);
+
+###############
+##END OF MAIN##
+###############
+################
+##SUBROUTINES  #
+################
 
 sub parse_args{
 	my $cnf = shift;
@@ -142,7 +233,6 @@ sub parse_args{
 		}
 	}
 	#some checking
-	#die(Dumper($cfg->GroupMembers('DATASET')));
 	foreach my $k(keys %MAND_PARAM){
 		foreach my $sect(keys %{$MAND_PARAM{$k}}){
 			my $gfound=0;
@@ -166,64 +256,6 @@ sub parse_args{
 }
 
 
-
-
-my %ds_params;
-my $cfg=parse_args($inifile);	 
-
-$BASE_DIR=$cfg->val('GLOBAL','base_dir').'/';
-
-if(-e "$BASE_DIR/results.tab"){
-	if(yesno("Already completed this analysis: show results and exit ?")){
-		print_results($BASE_DIR);
-		exit(1);
-	}
-}
-
-foreach my $ds ($cfg->GroupMembers('DATASET')){
-	print $ds."\n";
-	$ds_params{$ds}=analyse_dataset($cfg,$ds);
-}
-
-
-## final computation of Z scores combines results from both datasets and is separate
-
-my %zparams;
-foreach my $ds (keys %ds_params){
-	my %a = %{$ds_params{$ds}};
-	foreach my $al(keys %a){
-		#debug("Computing Z score for $ds:$a");
-		my %p = %{$a{$al}};
-		next unless $p{wfile}; ## need this or else cannot compute !
-		push @{$zparams{$al}{wstarfile}},$p{wstarfile};
-		push @{$zparams{$al}{wfile}},$p{wfile};
-	}
-}
-
-#die(Dumper(%zparams));
-
-
-my @jids;
-foreach my $analysis(keys %zparams){
-		my $resoutfile = "$BASE_DIR/$analysis.Z.RData";
-		my $jid = compute_Z($zparams{$analysis}{wfile},
-			$zparams{$analysis}{wstarfile},
-			$resoutfile,$BASE_DIR."/$DIRS{LOG}"
-			);
-		push @jids,$jid;
-}
-do{sleep($GLOBALS{SM}{q_poll_time})} until check_task_finished(\@jids);
-sleep(5); ## let FS catch up
-print_results($BASE_DIR);
-
-
-
-exit(1);
-
-################
-##SUBROUTINES  #
-################
-
 =head2 analyse_dataset
 
  NAME: analyse_dataset
@@ -240,7 +272,7 @@ sub analyse_dataset{
   	  if(-e $snp_cat){
 	    $SNP_CATALOGUE = $snp_cat
 	  }else{
-	    debug("Cannot find $snp_cat for this datasource: using $SNP_CATALOGUE");
+	    debug("Cannot find $snp_cat for this datasource: using $SNP_CATALOGUE",$DEBUG);
 	  }
 	}
 	my %SKIP_STEP=();
@@ -250,7 +282,7 @@ sub analyse_dataset{
 		
 	(my $DS_NAME = $dataset) =~ s/DATASET\s+//;
 	
-	##for ease add these to a hash within available to subroutine
+	##for ease add these to a hash
 	my %targs = (
 		base_dir=> $cfg->val('GLOBAL','base_dir').'/',
 		pval_file => $cfg->val($dataset,'pval_file'),
@@ -260,8 +292,6 @@ sub analyse_dataset{
 		exclude_region_file => $cfg->val('GLOBAL','exclude_region_file'),
 		tss_extension => $cfg->val('GLOBAL','tss_extension'),
 		gt_dir=> $cfg->val($dataset,'gt_dir'),
-		#test_set=>$cfg->val('GLOBAL','test_set'),
-		#ref_set=>$cfg->val('GLOBAL','ref_set'),
 		filter=>$cfg->val('GLOBAL','filter'),
 		perm_number=>$cfg->val('GLOBAL','perm_number'),
 		sigma_index=>$cfg->val('GLOBAL','sigma_index'),
@@ -270,26 +300,21 @@ sub analyse_dataset{
 		
 	);
 	
-	#die(Dumper(\%targs));
-	
-	## set up analysis                       
+	## set up analysis datastructure                      
 	my %analysis;
 	foreach my $al($cfg->val('GLOBAL','analysis')){
 		my ($tname,$test,$ref)=split(/\s+/,$al);
 		$analysis{$tname}=[$test,$ref];
 	}
-	## STEP 1: SETUP
-	
-	
+	## STEP SETUP
 	
 	## if the user has defined perm_dir then skip sigma
 	
 	$SKIP_STEP{sigma}=1 if $targs{perm_dir};
-	
-	## if the user has defined a regions_file then use alternative method
-	## to create support file
 
 	my $dirs = make_support_dir($targs{base_dir}.$targs{datasource_name},0);
+	
+	## STEP CREATE SNP CATALOG
 	
 	## next make snp support files if required
 	
@@ -301,61 +326,15 @@ sub analyse_dataset{
 	
 	
 	## 1a create support file if required based on genes
-	if($run_support){ 
-		my @jids;
-		if(-e $targs{'geneset_file'}){
-			debug("FOUND GENESET creating GenomicRanges");
-			@jids = create_gene_files(
-				$targs{'geneset_file'},
-				$dirs->{GR},
-				$GLOBALS{SM}{tabix_chunksize},
-				$MART_HOST,$targs{tss_extension},
-				$dirs->{LOG});
-		}elsif(-e $targs{'regionset_file'}){ ## 1b or based on regions
-			debug("FOUND REGIONSET creating GenomicRanges");
-				@jids = create_region_files(
-					$targs{'regionset_file'},
-					$dirs->{GR},
-					$dirs->{LOG});
-		}
-		do{sleep($GLOBALS{SM}{q_poll_time})} until check_task_finished(\@jids);
-		
-		## using defined catalog assign positional locations for snps
-		## in submitted pvalue file.
-		
-		my $jids = run_lookup_snps(
-			$targs{'pval_file'},
-			$dirs->{GR},
-			$dirs->{TSNP},
-			$targs{'exclude_region_file'},
-			$GLOBALS{SM}{tabix_bin},$SNP_CATALOGUE,
-			$dirs->{LOG});
-		do{sleep($GLOBALS{SM}{q_poll_time})} until check_task_finished($jids);
-		my @jids = consollidate_snps($dirs->{TSNP},$snp_file,$dirs->{LOG});
-		do{sleep($GLOBALS{SM}{q_poll_time})} until check_task_finished(\@jids);
+	if($run_support){
+		debug("## CREATING SUPPORT FILES",1);
+		run_support($dirs,$snp_file,\%targs);
 		$FORCE_STEP{sigma}=1;
-}
+	}
 
-## if we want to run efficiently w/o q then we need to reinstate this code !!
-
-#	if($run_support){ 
-#		debug("Generating support files $snp_file");
-#		my @jids = make_support_files(
-#			$targs{'pval_file'},
-#			$targs{'geneset_file'},
-#			$snp_file,
-#			$targs{'exclude_region_file'},
-#			$GLOBALS{SM}{tabix_bin},$SNP_CATALOGUE,$GLOBALS{SM}{tabix_chunksize},
-#			$MART_HOST,$targs{tss_extension},
-#			$dirs->{LOG});
-#		do{sleep($GLOBALS{SM}{q_poll_time})} until check_task_finished(\@jids);
-#		## automatically recompute sigmas
-#		$FORCE_STEP{sigma}=1;
-#	}
-
-	## STEP 2: COMPUTE SIGMA'S these are used for the multivariate sampling.
-	
-	my $rhash;
+	## STEP COMPUTE SIGMA'S these are used for the multivariate sampling.
+	                                   
+	my $rarray;  
 	my $sigdotfile = $dirs->{SIGMA}."/.sigma";
 	my $run_sigma = 1;
 	if(-e $sigdotfile && !$FORCE_STEP{sigma} && !$SKIP_STEP{sigma}){
@@ -363,45 +342,14 @@ sub analyse_dataset{
 	}	
 	$run_sigma = 0 if $SKIP_STEP{sigma};
 	if($run_sigma){
-    ##check as to whether we should use pregenerated sigmas
-    if($targs{sigma_index}){
-      ##retrieve sigmas
-      $rhash = retrieve_sigmas(
-        $snp_file,
-        $dirs->{SIGMA},
-        $targs{sigma_index},
-        $dirs->{SSNP},
-        $targs{gt_dir},
-        $targs{full_sigma},
-        $dirs->{LOG});
-    }else{
-      if(!-d $targs{gt_dir}){
-        die("Cannot find genotype dir $targs{gt_dir}: If you haven't got genotypes consider using precomputed sigmas (sigma_index parameter)\n.")
-      }
-		  $rhash = create_sigmas(
-		    $snp_file,
-		    $dirs->{SIGMA},
-		    $targs{gt_dir},
-		    $dirs->{SSNP},
-		    $dirs->{LOG});
-    }
-		my @jids = keys(%$rhash);
-		return if !@jids;
-		do{sleep($GLOBALS{SM}{q_poll_time})} until check_task_finished(\@jids);
-		#write the snpfile to sigma mapping to a file
-		#doubles as evidence that we have done things and also 
-		#means we can run subsequent commands w/o having to run this
-		open(SIG,">$sigdotfile") || die "Cannot open sigma dot file: $sigdotfile\n";
-		foreach my $jid (keys(%$rhash)){
-			my %h=%{$rhash->{$jid}};
-			print SIG join("\t",$h{snpfile},$h{sigmafile})."\n";
-		}
-		close(SIG);
+		debug("## COMPUTING SIGMA",1);
+		run_sigma($dirs,$snp_file,$sigdotfile,\%targs);
 		## automatically recompute perms
 		$FORCE_STEP{perms}=1;
 	}
 	
-	## STEP 3a: COMPUTE PERMS
+	
+	## STEP COMPUTE PERMS
 	
 	my $permsdotfile = $dirs->{PERMS}."/.perms";
 	my $run_perms = 1;
@@ -409,136 +357,46 @@ sub analyse_dataset{
 		$run_perms = 0 unless yesno("perm files found do you wish to recompute?");
 	}
 	if($run_perms){
-		if(-d $dirs->{PERMS}){
-			## clear up first
-			remove_tree(($dirs->{PERMS},$dirs->{TPERMS}),{keep_root => 1,result=> \my $del_dirs});
-			debug(join("\n",@$del_dirs));
-		}
-		## read in sigma .file
-		my @jids;
-		if($targs{perm_dir}){
-			## use precomputed perms i.e from permuting genotypes in case/control
-			my $jids = retrieve_perms($snp_file,
-				$dirs->{SSNP},
-				$targs{perm_dir},
-				$targs{perm_number},
-				$dirs->{TPERMS},
-				$dirs->{LOG});
-			##think perhaps we should chuck an error !
-			return if !@$jids;
-			@jids=@$jids;
-		}else{ ## generate perms 
-			open(SIG, $sigdotfile) || die "Cannot find sigma dot file $sigdotfile\n";
-			my @plist;
-			while(<SIG>){
-				chomp;
-				my($sfile,$sigfile) = split("\t",$_);
-				my %hash = (snpfile=>$sfile,
-										sigmafile=>$sigfile);
-				push @plist,\%hash;
-			}
-			close(SIG);
-			## clear up
-		
-	
-			my $csize = ceil($targs{perm_number}/$GLOBALS{SM}{default_perm_per_chunk});
-			## $csize should be 1 if $DEFAULT_PERM_PER_CHUNK > perm_number
-			my $rhash = compute_perms(\@plist,$dirs->{TPERMS},
-					$GLOBALS{SM}{default_perm_per_chunk},$targs{full_sigma},$dirs->{LOG},$csize);
-			#die(Dumper($rhash));
-			@jids = keys %$rhash;
-			return if !@jids;
-		
-		}
-		do{sleep($GLOBALS{SM}{q_poll_time})} until check_task_finished(\@jids);
-		my $outfiles = collapse_perms($dirs->{TPERMS},$dirs->{PERMS},$dirs->{LOG});
-		open(SIG,">$permsdotfile") || die "Cannot open perms dot file: $permsdotfile\n";
-		foreach my $f (@$outfiles){
-			print SIG "$f\n";
-		}
-		close(SIG);
+		debug("## COMPUTING PERMS",1);
+		run_perms($dirs,$snp_file,$sigdotfile,$permsdotfile,\%targs);
 		## automatically recompute wstar
 		$FORCE_STEP{wstar}=1;
-	}
+		debug("## CHECKING PERMS",1);
+		die "Error checking perms " unless
+			run_check_perms($dirs,$snp_file,$permsdotfile)
+	}   
 	
 	
-	## STEP 3b: CHECK PERMS
-	
-	#check the perms are created and create missing snps list if the snpfile and perm rownames lists
-	#are not the same
+	##STEP COMPUTE W FOR PERMS
+	debug("## COMPUTING W*",1);
+	my $wparams = run_wstar(\%analysis,$dirs,$snp_file,$FORCE_STEP{wstar},\%targs);
+	debug("## CONSOLIDATING W* AND COMPUTING W",1);
+	return run_consolidate_wstar_and_w($wparams,$dirs,$snp_file,\%targs); 
+}
+
+
+sub run_check_perms{
+	my ($dirs,$snp_file,$permsdotfile) = @_;
 	my $check_permsdotfile = $dirs->{PERMS}."/.checked";
-	#die( $check_permsdotfile);
 	if(!-e $check_permsdotfile){
 		check_perms($permsdotfile,$snp_file,$dirs->{LOG});
-		if(-e $dirs->{PERMS}."/.error"){
-			die("There has been an error generating permutations and they are malformed\n");
+		if(-e $dirs->{PERMS}."/.error"){ ## notsure that this works
+			debug("There has been an error generating permutations and they are malformed\n",$DEBUG);
+			return 0;
 		}elsif(-e $dirs->{PERMS}."/.missing"){
-			debug("There are snps missing from perm files!");
+			open(MISS, $dirs->{PERMS}."/.missing") || die "cannot open ".$dirs->{PERMS}."/.missing\n";
+			while (<MISS>) {}
+			my $miss_count = $.;
+			debug("There are $miss_count snps missing from perm files!",$DEBUG);
+			## TODO we should attempt here to find these SNPs somehow !
 			if(!yesno("Do you wish to continue?")){
-			exit(1);
-			}else{
-				open(MISS, $dirs->{PERMS}."/.missing") || die "cannot open ".$dirs->{PERMS}."/.missing\n";
-				while(<MISS>){
-					chomp;
-					debug($_);
-				}
+				return 0;
 			}
 		}
 	}
-	
-	
-	##STEP 4: COMPUTE W FOR PERMS
-	my @wstar_jids;
-	my %wparams;
-	foreach my $al(keys %analysis){
-		$wparams{$al}{test_set}=$analysis{$al}->[0];
-		$wparams{$al}{ref_set}=$analysis{$al}->[1];
-		my $wstardir = $dirs->{WSTAR}."/".$wparams{$al}{test_set}.'_VS_'.$wparams{$al}{ref_set};
-		#die($wstardir);
-		my $run_wstar = 1;
-		if((-d $wstardir || -e basename($wstardir).".Wstar.RData") && !$FORCE_STEP{wstar}){
-			$run_wstar = 0 unless yesno("wstar: $wstardir dir found do you wish to recompute?");
-		}
-		if($run_wstar){
-				## clear up
-			if(-d $wstardir){
-				## clear up first
-				remove_tree($wstardir,{keep_root => 1,result=> \my $del_dirs});
-				debug(join("\n",@$del_dirs));
-			}
-			$wparams{$al}{wstardir} = $wstardir;
-			#next;
-			#push @wdirs,$wstardir;
-		  my $miss_file = $dirs->{PERMS}."/.missing";
-			$wparams{$al}{missingfile}=$miss_file;
-		  my $jids = compute_wstar(
-		  	$wparams{$al}{test_set},$wparams{$al}{ref_set},
-		  	$targs{filter},$snp_file,$dirs->{PERMS},
-		  	$dirs->{WSTAR},$miss_file,$dirs->{LOG});
-		  push @wstar_jids,@$jids;
-		  $wparams{$al}{jids} = $jids;
-		}
-	}
-	do{sleep($GLOBALS{SM}{q_poll_time})} until check_task_finished(\@wstar_jids);
-	foreach my $al(keys %wparams){
-		my $d = $wparams{$al}{wstardir};
-		next unless $d; ## this means wstar was not computed on this run so below does not change
-		my $wstarfile = $dirs->{WSTAR}.'/'.basename($d).".Wstar.RData";
-		$wparams{$al}{wstarfile} = $wstarfile;
-		debug("Consolidating $d");
-		## TODO ALTER SO ALL CONSOLIDATION HITS Q AT THE SAME TIME
-		my $jid = consolidate_wstar($d,$wstarfile,$dirs->{LOG});
-		do{sleep($GLOBALS{SM}{q_poll_time})} until check_task_finished([$jid]);
-		my $wfile = $dirs->{WSTAR}.'/'.basename($d).".W.RData";
-		debug("Computing W");
-		my $jid = compute_w($snp_file,$wfile,$wparams{$al}{test_set},
-			$wparams{$al}{ref_set},$targs{filter},
-			$wparams{$al}{missingfile},$dirs->{LOG});
-		do{sleep($GLOBALS{SM}{q_poll_time})} until check_task_finished([$jid]);
-		$wparams{$al}{wfile} = $wfile;
-	}
-	return \%wparams;	
+	return 1;
 }
+	
 
 =head2 consolidate_wstar
 
@@ -553,7 +411,7 @@ sub analyse_dataset{
 =cut
 
 sub consolidate_wstar{    
-	my ($wdir,$outfile,$log_dir) = @_;
+	my ($wdir,$outfile,$step,$log_dir) = @_;
 	my ($fh,$fname) = &get_tmp_file($GLOBALS{SM}{grid_scratch});
 	my $R=<<REND;
 wstar.dir<-'$wdir'
@@ -566,9 +424,12 @@ REND
   close($fh);
   #my $cmd = "$RSCRIPT --vanilla $fname > /dev/null 2>&1";
   my $cmd = "$GLOBALS{SM}{rscript} --vanilla $fname";
-  dispatch_Rscript($cmd,"$log_dir/consolidate_wstar");
-  #`$cmd`;                                   
-  #unlink($fname) unless $GLOBALS{SM}{keep_tmp_files};    
+  my $job = Sandman::Step::Job->new(command=>$cmd);
+  if($step->add_job($job)){
+  	return 1;
+  }else{
+  	return 0;
+  } 
 }
 
 =head2 compute_Z
@@ -585,7 +446,7 @@ REND
 
 sub compute_Z{
 	# need Wstar, W (i.e.pvals) and snpnames in and snpnames out for each dataset
-	my ($wfiles,$wstarfiles,$outfile,$logdir) = @_;
+	my ($wfiles,$wstarfiles,$outfile,$step) = @_;
 	my ($fh,$fname) = &get_tmp_file($GLOBALS{SM}{grid_scratch});
 	my $wfname = join ',', map { qq/'$_'/ }@$wfiles;
 	my $wstarfname = join ',', map { qq/'$_'/ }@$wstarfiles;
@@ -606,7 +467,9 @@ REND
   close($fh);
   #my $cmd = "$RSCRIPT --vanilla $fname > /dev/null 2>&1";
   my $cmd = "$GLOBALS{SM}{rscript} --vanilla $fname";
-  return(dispatch_Rscript($cmd,"$logdir/compute_Z"));
+  my $job = Sandman::Step::Job->new(command=>$cmd);
+	return($step->add_job($job));
+  #return(dispatch_Rscript($cmd,"$logdir/compute_Z"));
   #`$cmd`;                                   
   #unlink($fname) unless $GLOBALS{SM}{keep_tmp_files};    
 }
@@ -626,15 +489,15 @@ REND
 sub make_support_dir{
 	my ($dir,$force)=@_;
 	if(-d $dir && !$force){
-		debug("Directory exists and force flag not set.");
+		debug("Directory exists and force flag not set.",$DEBUG);
 		if(!yesno("Directory $dir already exists are you sure you want to proceed ?")){
 			exit(1);
 		}
 	}elsif(-d $dir && $force){
-		debug("Directory exists and force flag set. Deleting directory ..");
+		debug("Directory exists and force flag set. Deleting directory ..",$DEBUG);
 		## perhaps check interactively as this could be incredibly dangerous ?
 		remove_tree($dir,{keep_root => 1,result=> \my $del_dirs});
-		debug(join("\n",@$del_dirs));
+		debug(join("\n",@$del_dirs),$DEBUG);
 	}else{
 		mkpath_wrapper($dir);
 	}
@@ -646,10 +509,6 @@ sub make_support_dir{
 	}
 	return(\%reshash);
 }
-
-## FUNCTION CREATES SNP SUPPORT FILE
-## TODO MAKE THIS COMPATIBLE WITH RUNNING ON THE Q ?
-## AS FOR LOTS OF GENES THIS BIT WILL BE SLOW.
 
 =head2 create_gene_files
 
@@ -668,20 +527,44 @@ sub make_support_dir{
 sub create_gene_files{
 	my ($genefile,$outdir,$tabix_chunksize,
 			$mart_host,$tss_extension,$log_dir)=@_;
+	my $step = Sandman::Step->new(
+		logdir=>"$log_dir/create_gene_files",
+		driver=>$DRIVER,
+		env_settings=>"R_LIBS=$RLIBS"
+	);
 	my $cmd = "$GLOBALS{SM}{rscript} $RSCRIPTS{create_gene_files}  misc.functions=\\'$RSCRIPTS{misc_functions}\\' ";
 	$cmd.= "gene.file=\\'$genefile\\' ";
 	$cmd.= "out.dir=\\'$outdir\\' ";
 	$cmd.= "chunksize=$tabix_chunksize ";
 	$cmd.= "mart_host=\\'$mart_host\\' tss.extension=$tss_extension";
-	return(dispatch_Rscript($cmd,"$log_dir/create_gene_files"));
+	my $job = Sandman::Step::Job->new(command=>$cmd);
+	$step->add_job($job);
+	return do_step($step);
 }
 
 sub create_region_files{
 	my ($regionfile,$outdir,$log_dir)=@_;
+	my $step = Sandman::Step->new(
+		logdir=>"$log_dir/create_region_files",
+		driver=>$DRIVER,
+		env_settings=>"R_LIBS=$RLIBS"
+	);
 	my $cmd = "$GLOBALS{SM}{rscript} $RSCRIPTS{create_region_files} ";
 	$cmd.= "region.file=\\'$regionfile\\' ";
 	$cmd.= "out.dir=\\'$outdir\\' ";
-	return(dispatch_Rscript($cmd,"$log_dir/create_region_files"));
+	my $job = Sandman::Step::Job->new(command=>$cmd);
+	$step->add_job($job);
+	return do_step($step);
+}
+
+sub do_step{
+	my $step = shift;
+	if($step->execute()){
+		$step->wait_on_complete();
+		return 1;
+	}else{
+		return 0;
+	}
 }
 
 =head2 make_support_files
@@ -722,25 +605,35 @@ sub make_support_files{
 }
 
 sub run_lookup_snps{
-		my ($snpfile,$regiondir,$outdir,
-			$exclfile,$tabix,$snpcat,$log_dir)=@_;
-		my @jids;
-		find(sub{
-				if(/chunk\.[0-9]+\.RData/){
-					my $cmd = "$GLOBALS{SM}{rscript} $RSCRIPTS{lookup_snps} misc.functions=\\'$RSCRIPTS{misc_functions}\\' ";
-					$cmd.= "region.file=\\'$File::Find::name\\' excl.file=\\'$exclfile\\' ";
-					$cmd.= "tabix.bin=\\'$tabix\\' ";
-					$cmd.= "tabix.snp.catalogue.file=\\'$snpcat\\' ";
-					$cmd.= "snp.file=\\'$snpfile\\' out.dir=\\'$outdir\\'";
-					my $jid = dispatch_Rscript($cmd,"$log_dir/lookup_snps");
-					push @jids,$jid;
-				}
-		},$regiondir);
-		return \@jids;
+	my ($snpfile,$regiondir,$outdir,
+		$exclfile,$tabix,$snpcat,$log_dir)=@_;
+	my $step = Sandman::Step->new(
+		logdir=>"$log_dir/lookup_snps",
+		driver=>$DRIVER,
+		env_settings=>"R_LIBS=$RLIBS"
+	);
+	my @jids;
+	find(sub{
+			if(/chunk\.[0-9]+\.RData/){
+				my $cmd = "$GLOBALS{SM}{rscript} $RSCRIPTS{lookup_snps} misc.functions=\\'$RSCRIPTS{misc_functions}\\' ";
+				$cmd.= "region.file=\\'$File::Find::name\\' excl.file=\\'$exclfile\\' ";
+				$cmd.= "tabix.bin=\\'$tabix\\' ";
+				$cmd.= "tabix.snp.catalogue.file=\\'$snpcat\\' ";
+				$cmd.= "snp.file=\\'$snpfile\\' out.dir=\\'$outdir\\'";
+				my $job = Sandman::Step::Job->new(command=>$cmd);
+				$step->add_job($job);
+			}
+	},$regiondir);
+	return do_step($step);
 }
 
 sub check_perms{
   my ($dotfile,$snpfile,$log_dir)=@_;
+  	my $step = Sandman::Step->new(
+		logdir=>"$log_dir/check_perms",
+		driver=>$DRIVER,
+		env_settings=>"R_LIBS=$RLIBS"
+	);
   my ($fh,$fname) = &get_tmp_file($GLOBALS{SM}{grid_scratch});
   my $R=<<REND;
 dotfile<-'$dotfile'
@@ -759,15 +652,19 @@ file.create(check.fname)
 REND
   print $fh $R;
   close($fh);
-  #my $cmd = "$RSCRIPT --vanilla $fname > /dev/null 2>&1";
   my $cmd = "$GLOBALS{SM}{rscript} --vanilla $fname";
-  return(dispatch_Rscript($cmd,"$log_dir/check_perms"));
-  #`$cmd`;                                   
-  #unlink($fname) unless $GLOBALS{SM}{keep_tmp_files};    
+  my $job = Sandman::Step::Job->new(command=>$cmd);
+	$step->add_job($job);
+	return do_step($step);
 }
 
-sub consollidate_snps{
-	my ($snpdir,$snpfile,$logdir)=@_;
+sub consolidate_snps{
+	my ($snpdir,$snpfile,$log_dir)=@_;
+	my $step = Sandman::Step->new(
+		logdir=>"$log_dir/consolidate_snps",
+		driver=>$DRIVER,
+		env_settings=>"R_LIBS=$RLIBS"
+	);
 	my ($fh,$fname) = &get_tmp_file($GLOBALS{SM}{grid_scratch});
 	my $R=<<REND;
 library(GenomicRanges)
@@ -785,8 +682,9 @@ REND
   print $fh $R;
   close($fh);
   my $cmd = "$GLOBALS{SM}{rscript} --vanilla $fname";
-  return(dispatch_Rscript($cmd,"$logdir/consollidate_snps"));
-  #unlink($fname);
+	my $job = Sandman::Step::Job->new(command=>$cmd);
+	$step->add_job($job);
+	return do_step($step);
 }
 
        
@@ -795,7 +693,12 @@ REND
 ## as then we can compute sigma's on the q much more quickly
 
 sub prepare_snps_for_q{
-  my ($outdir,$snpfile,$logdir)=@_; 
+  my ($outdir,$snpfile,$log_dir)=@_;
+  my $step = Sandman::Step->new(
+		logdir=>"$log_dir/prepare_snps_for_q",
+		driver=>$DRIVER,
+		env_settings=>"R_LIBS=$RLIBS"
+	);
   my ($fh,$fname) = &get_tmp_file($GLOBALS{SM}{grid_scratch});
   #open(TMP,">$fname") || die "Cannot open tmp file for writing\n";
   my $R=<<REND;
@@ -809,21 +712,21 @@ sapply(seq_along(grl),function(i){
  save(snps.gr,file=fname)
 })
 REND
-  #print $R;
-  #print TMP $R;
   print $fh $R;
   close($fh);
-  #my $cmd = "$RSCRIPT --vanilla $fname > /dev/null 2>&1";
   my $cmd = "$GLOBALS{SM}{rscript} --vanilla $fname";
-  #`$cmd`;
-  return(dispatch_Rscript($cmd,"$logdir/prepare_snps_for_q"));
-  #unlink($fname);
+  my $job = Sandman::Step::Job->new(command=>$cmd);
+  $step->add_job($job);
+	if(do_step($step)){
+  	return 1;
+  }else{
+  	return 0;
+  }
 }
 
 sub create_collapse_perms_script{
 	my ($flist,$outfile)=@_;
 	my ($fh,$fname) = &get_tmp_file($GLOBALS{SM}{grid_scratch});
-  #open(TMP,">$fname") || die "Cannot open tmp file for writing\n";
   my $R=<<REND;
 fl=c($flist)
 perms<-do.call("rbind",lapply(fl,function(x){
@@ -838,14 +741,18 @@ REND
 }
 
 sub collapse_perms{
-	my($indir,$outdir,$logdir)=@_;
+	my($indir,$outdir,$log_dir)=@_;
+	my $step = Sandman::Step->new(
+		logdir=>"$log_dir/collapse_perms",
+		driver=>$DRIVER,
+		env_settings=>"R_LIBS=$RLIBS"
+	);
 	my %hash;
 	find(sub{
 			if(/\.perms\.([0-9]+)\.RData$/){
 				push @{$hash{$1}},$File::Find::name;
 			}
 	},$indir);
-	debug(Dumper(\%hash));
 	my @jids;
 	my @tscripts;
 	my @outfiles;
@@ -855,13 +762,16 @@ sub collapse_perms{
 		my $fname=create_collapse_perms_script($flist,$outfile);
 		push @outfiles,$outfile;
 		my $cmd = "$GLOBALS{SM}{rscript} --vanilla $fname";
-		my $jid = dispatch_Rscript($cmd,"$logdir/collapse_perms");
-		push @jids,$jid;
+		my $job = Sandman::Step::Job->new(command=>$cmd);
+		$step->add_job($job);
 		push @tscripts,$fname;
 	}
-	do{sleep($GLOBALS{SM}{q_poll_time})} until check_task_finished(\@jids);
-	unlink @tscripts;
-	return \@outfiles;
+	if(do_step($step)){
+		unlink @tscripts;
+		return \@outfiles;
+	}else{
+		die("Unable to collapse perms");
+	}
 }
 	
  
@@ -870,18 +780,22 @@ sub collapse_perms{
 sub retrieve_sigmas{
   my ($snp_file,$sigma_dir,$sig_index,$scratch_dir,$chrXgt_dir,$full_sigma,$log_dir)=@_;
   $full_sigma = 1 if $full_sigma; ## incase they have used true or false
-  my @jids;
-  my %return;
-  if($GLOBALS{SM}{use_q}){
-    #we blow away contents of scratch_dir each time
-    remove_tree($scratch_dir,{keep_root => 1,result=> \my $del_dirs});
-    debug(join("\n",@$del_dirs));
-    my $jid = prepare_snps_for_q($scratch_dir,$snp_file,$log_dir);
-    do{sleep($GLOBALS{SM}{q_poll_time})} until check_task_finished([$jid]);
-    find(sub{
-      debug($_);
+  my @return;
+	#we blow away contents of scratch_dir each time
+	remove_tree($scratch_dir,{keep_root => 1,result=> \my $del_dirs});
+	debug(join("\n",@$del_dirs),$DEBUG);
+	
+	my $outcome = prepare_snps_for_q($scratch_dir,$snp_file,$log_dir);
+	die("could not prepare snps for the q") unless $outcome;
+	my $step = Sandman::Step->new(
+		logdir=>"$log_dir/retrieve_sigma",
+		driver=>$DRIVER,
+		env_settings=>"R_LIBS=$RLIBS"
+	);
+	find(sub{
+			debug($_,$DEBUG);
       if(/\.RData$/){
-        my $out_file = $sigma_dir.'/'.basename($_,'.RData').".sigma.RData";
+      	my $out_file = $sigma_dir.'/'.basename($_,'.RData').".sigma.RData";
         my $jid;
         if(/chrX\.RData$/){
         	if(! -e $chrXgt_dir){
@@ -896,32 +810,28 @@ PROMPT
         	## this means we need to calculate some sigma's rather than retrieve
         	my $cmd = "$GLOBALS{SM}{rscript} $RSCRIPTS{compute_sigma} snp.file=\\'$File::Find::name\\' ";
         	$cmd.= "gt.dir=\\'$chrXgt_dir\\' out.file=\\'$out_file\\' misc.functions=\\'$RSCRIPTS{misc_functions}\\'";
-        	$jid = dispatch_Rscript($cmd,"$log_dir/calculate_sigma");
+        	my $job = Sandman::Step::Job->new(command=>$cmd);
+        	$step->add_job($job);
+        	#$jid = dispatch_Rscript($cmd,"$log_dir/calculate_sigma");
         }else{
         	my $cmd = "$GLOBALS{SM}{rscript} $RSCRIPTS{retrieve_sigma} snp.file=\\'$File::Find::name\\' ";
         	$cmd.= "sigma.index.file=\\'$sig_index\\' out.file=\\'$out_file\\' misc.functions=\\'$RSCRIPTS{misc_functions}\\' ";
         	$cmd.= "full.sigma=$full_sigma";
-        	$jid = dispatch_Rscript($cmd,"$log_dir/retrieve_sigma");
+        	my $job = Sandman::Step::Job->new(command=>$cmd);
+        	$step->add_job($job);
+        	#$jid = dispatch_Rscript($cmd,"$log_dir/retrieve_sigma");
         }
-        debug("Running job $jid");
-        ## create a hash of script params that we want to pass downstream
-        $return{$jid}={
-          snpfile=>$File::Find::name,
+        push @return,{
+        	snpfile=>$File::Find::name,
           sigmafile=>$out_file
         };
       }
-    },$scratch_dir);
+	},$scratch_dir);
+  if(do_step($step)){
+  	return \@return;
   }else{
-    my $out_file = $sigma_dir.'/all.sigma.RData';
-    my $cmd = "$GLOBALS{SM}{rscript} $RSCRIPTS{retrieve_sigma} snp.file=\\'$snp_file\\' ";
-    $cmd.= "sigma.index.file=\\'$sig_index\\' out.file=\\'$out_file\\' misc.functions=\\'$RSCRIPTS{misc_functions}\\'";
-    dispatch_Rscript($cmd,"$log_dir/retrieve_sigma");
-    $return{NOQ}={
-        snpfile=>$snp_file,
-        sigmafile=>$out_file
-    };
+  	die("Unable to retrieve sigmas");
   }
-  return \%return;
 }
 
   
@@ -929,40 +839,36 @@ PROMPT
 sub create_sigmas{
   my ($snp_file,$sigma_dir,$gt_dir,$scratch_dir,$log_dir)=@_;
   #create a temp dir
-  my @jids;
-  my %return;
-  if($GLOBALS{SM}{use_q}){
-    #we blow away contents of scratch_dir each time
-    remove_tree($scratch_dir,{keep_root => 1,result=> \my $del_dirs});
-    debug(join("\n",@$del_dirs));
-    my $jid = prepare_snps_for_q($scratch_dir,$snp_file,$log_dir);
-    do{sleep($GLOBALS{SM}{q_poll_time})} until check_task_finished([$jid]);
-    find(sub{
-      debug($_);
-      if(/\.RData$/){
-      	my $out_file = $sigma_dir.'/'.basename($_,'.RData').".sigma.RData";
-      	my $cmd = "$GLOBALS{SM}{rscript} $RSCRIPTS{compute_sigma} snp.file=\\'$File::Find::name\\' ";
-      	$cmd.= "gt.dir=\\'$gt_dir\\' out.file=\\'$out_file\\' misc.functions=\\'$RSCRIPTS{misc_functions}\\'";
-      	my $jid = dispatch_Rscript($cmd,"$log_dir/compute_sigma");
-      	debug("Running job $jid");
-      	## create a hash of script params that we want to pass downstream
-      	$return{$jid}={
-      		snpfile=>$File::Find::name,
-      		sigmafile=>$out_file
-      	};
-      }
-    },$scratch_dir);
-  }else{
-    my $out_file = $sigma_dir.'/all.sigma.RData';
-    my $cmd = "$GLOBALS{SM}{rscript} $RSCRIPTS{compute_sigma} snp.file=\\'$snp_file\\' ";
-    $cmd.= "gt.dir=\\'$gt_dir\\' out.file=\\'$out_file\\' misc.functions=\\'$RSCRIPTS{misc_functions}\\'";
-    dispatch_Rscript($cmd,"$log_dir/compute_sigma");
-    $return{NOQ}={
-    		snpfile=>$snp_file,
-      	sigmafile=>$out_file
-    };
-  }
-  return \%return;
+    my $step = Sandman::Step->new(
+		logdir=>"$log_dir/compute_sigma",
+		driver=>$DRIVER,
+		env_settings=>"R_LIBS=$RLIBS"
+	);
+ #we blow away contents of scratch_dir each time
+	remove_tree($scratch_dir,{keep_root => 1,result=> \my $del_dirs});
+	debug(join("\n",@$del_dirs),$DEBUG);
+	my $jid = prepare_snps_for_q($scratch_dir,$snp_file,$log_dir);
+	do{sleep($GLOBALS{SM}{q_poll_time})} until check_task_finished([$jid]);
+	my @return;
+	find(sub{
+ 		 debug($_,$DEBUG);
+ 		 if(/\.RData$/){
+ 		 	 my $out_file = $sigma_dir.'/'.basename($_,'.RData').".sigma.RData";
+ 		 	 my $cmd = "$GLOBALS{SM}{rscript} $RSCRIPTS{compute_sigma} snp.file=\\'$File::Find::name\\' ";
+ 		 	 $cmd.= "gt.dir=\\'$gt_dir\\' out.file=\\'$out_file\\' misc.functions=\\'$RSCRIPTS{misc_functions}\\'";
+ 		 	 my $job = Sandman::Step::Job->new(command=>$cmd);
+ 		 	 $step->add_job($job);	
+ 		 	 push @return,{
+		  	snpfile=>$File::Find::name,
+		    sigmafile=>$out_file
+		  };
+		}
+	},$scratch_dir);
+	if(do_step($step)){
+		return \@return;
+	}else{
+		die("Unable to create sigmas");
+	}
 }
 
 ## compute W
@@ -992,7 +898,7 @@ REND
 }
 
 sub compute_w{
-	my ($snpfile,$outfile,$test_set,$ctrl_set,$filter,$missfile,$logdir)=@_;
+	my ($snpfile,$outfile,$test_set,$ctrl_set,$filter,$missfile,$step,$logdir)=@_;
 	my $subset = "(snps.gr\$$test_set | snps.gr\$$ctrl_set) & $filter";
 	my ($fh,$fname) = &get_tmp_file($GLOBALS{SM}{grid_scratch});
 	my $R=<<REND;
@@ -1017,88 +923,66 @@ save(W,file='$outfile');
 REND
   print $fh $R;
   close($fh);
-  #my $cmd = "$RSCRIPT --vanilla $fname > /dev/null 2>&1";
   my $cmd = "$GLOBALS{SM}{rscript} --vanilla $fname";
-  #`$cmd`; 
-  return(dispatch_Rscript($cmd,"$logdir/compute_w"));
-  #unlink($fname) unless $GLOBALS{SM}{keep_tmp_files};  
+	my $job = Sandman::Step::Job->new(command=>$cmd);
+	if($step->add_job($job)){
+		return 1;
+	}else{
+		return 0;
+	}
 } 
 
 
 sub retrieve_perms{
 	my($snp_file,$scratch_dir,$perm_in_dir,$perm_number,$perm_tmp,$log_dir)=@_;
-	my @jids;
-	if($GLOBALS{SM}{use_q}){
-		#we blow away contents of scratch_dir each time
-    remove_tree($scratch_dir,{keep_root => 1,result=> \my $del_dirs});
-    debug(join("\n",@$del_dirs));
-    my $jid = prepare_snps_for_q($scratch_dir,$snp_file,$log_dir);
-    do{sleep($GLOBALS{SM}{q_poll_time})} until check_task_finished([$jid]);
-    find(sub{
-    		debug($_);
-    		if(/\.RData$/){
-    			my $cmd = "$GLOBALS{SM}{rscript} $RSCRIPTS{retrieve_perms} snp.file=\\'$File::Find::name\\' ";
-    			$cmd.="perm.dir=\\'$perm_in_dir\\' out.dir=\\'$perm_tmp\\' n.perms=$perm_number";
-    			debug($cmd);
-    			my $jid = dispatch_Rscript($cmd,"$log_dir/retrieve_perms");
-    			push @jids,$jid;
-    		}
-    },$scratch_dir);
-  }else{
-  	##non q based and untested
-  	my $cmd = "$GLOBALS{SM}{rscript} $RSCRIPTS{retrieve_perms} snp.file=\\'$snp_file\\' ";
-  	$cmd.="perm.dir=\\'$perm_in_dir\\' out.dir=\\'$perm_tmp\\' n.perms=$perm_number";
-  	debug($cmd);
-  	dispatch_Rscript($cmd,"$log_dir/retrieve_perms");
-  }
-  return \@jids;
+		my $step = Sandman::Step->new(
+		logdir=>"$log_dir/retrieve_perms",
+		driver=>$DRIVER,
+		env_settings=>"R_LIBS=$RLIBS"
+	);
+  remove_tree($scratch_dir,{keep_root => 1,result=> \my $del_dirs});
+  debug(join("\n",@$del_dirs),$DEBUG);
+  my $jid = prepare_snps_for_q($scratch_dir,$snp_file,$log_dir);
+  do{sleep($GLOBALS{SM}{q_poll_time})} until check_task_finished([$jid]);
+  find(sub{
+  		debug($_,$DEBUG);
+  		if(/\.RData$/){
+  			my $cmd = "$GLOBALS{SM}{rscript} $RSCRIPTS{retrieve_perms} snp.file=\\'$File::Find::name\\' ";
+  			$cmd.="perm.dir=\\'$perm_in_dir\\' out.dir=\\'$perm_tmp\\' n.perms=$perm_number";
+  			my $job = Sandman::Step::Job->new(command=>$cmd);
+  			$step->add_job($job);
+  		}
+  },$scratch_dir);
+  return do_step($step);
 }
-  	#push @jids,$jid;
+
 ## for a given snp file and matching sigma file
 ## create a matrix of perms that we can use to
 ## compute Wstar
 	
 sub compute_perms{
 	my ($plist,$permdir,$number_perms,$full_sigma,$log_dir,$chunksize)=@_;
+	my $step = Sandman::Step->new(
+		logdir=>"$log_dir/compute_perms",
+		driver=>$DRIVER,
+		env_settings=>"R_LIBS=$RLIBS"
+	);
 	$full_sigma=1 if $full_sigma;
 	$chunksize=1 unless $chunksize; # in case it's not set;
-	my %return;
-	my @jids;
-  if($GLOBALS{SM}{use_q}){
-    foreach my $phash(@$plist){
-    	my $snpfile = $phash->{snpfile};
-    	my $sigmafile = $phash->{sigmafile};
-    	for(my $x=1;$x<=$chunksize;$x++){
-    		my $out_file = $permdir.'/'.basename($snpfile,'.RData').".perms.$x.RData";
-      	my $cmd = "$GLOBALS{SM}{rscript} $RSCRIPTS{compute_mvs_perms} snp.file=\\'$snpfile\\' ";
-      	$cmd.= "sigma.file=\\'$sigmafile\\' out.file=\\'$out_file\\' n.perms=$number_perms misc.functions=\\'$RSCRIPTS{misc_functions}\\' ";
-      	$cmd.= "full.sigma=$full_sigma";
-      	debug($cmd);
-      	my $jid = dispatch_Rscript($cmd,"$log_dir/compute_perms");
-      	debug("Running job $jid");
-      	## create a hash of script params that we want to pass downstream
-      	$return{$jid}={
-      		permfile=>$out_file
-      	};
-      }
+  foreach my $phash(@$plist){
+  	my $snpfile = $phash->{snpfile};
+  	my $sigmafile = $phash->{sigmafile};
+  	for(my $x=1;$x<=$chunksize;$x++){
+  		my $out_file = $permdir.'/'.basename($snpfile,'.RData').".perms.$x.RData";
+    	my $cmd = "$GLOBALS{SM}{rscript} $RSCRIPTS{compute_mvs_perms} snp.file=\\'$snpfile\\' ";
+    	$cmd.= "sigma.file=\\'$sigmafile\\' out.file=\\'$out_file\\' n.perms=$number_perms misc.functions=\\'$RSCRIPTS{misc_functions}\\' ";
+    	$cmd.= "full.sigma=$full_sigma";
+    	#debug($cmd);  
+    	my $job = Sandman::Step::Job->new(command=>$cmd);
+    	$step->add_job($job);
     }
-  }else{
-  	## it might be that we just run the code above and let dispatcher handle where it goes
-  	## in this way we just run a number of permutations 
-  	$number_perms = $number_perms * $chunksize;
-  	debug("Running $number_perms");
-  	my $snpfile = @$plist[0]->{snpfile};
-  	my $sigmafile = @$plist[0]->{sigmafile};
-  	my $out_file = $permdir.'/1.perms.RData';
-  	my $cmd = "$GLOBALS{SM}{rscript} $RSCRIPTS{compute_mvs_perms} snp.file=\\'$snpfile\\' ";
-  	$cmd.= "sigma.file=\\'$sigmafile\\' out.file=\\'$out_file\\' n.perms=$number_perms ";
-  	$cmd.= "full.sigma=$full_sigma";
-  	dispatch_Rscript($cmd,"$log_dir/compute_sigma");
-  	$return{NOQ}={
-  		permfile=>$out_file
-  	};
-  }                                      
-  return \%return;
+  }
+  return do_step($step);
 }
 
 
@@ -1140,161 +1024,231 @@ REND
 }
 
 sub compute_wstar{
-	my($test_set,$ctrl_set,$filter,$snpfile,$permdir,$wstardir,$missfile,$logdir)=@_;
+	my($test_set,$ctrl_set,$filter,$snpfile,$permdir,$wstardir,$missfile,$step,$logdir)=@_;
 	my $outdir = "$wstardir/${test_set}_VS_$ctrl_set";
 	mkpath_wrapper($outdir);
-	my @jids;
-	my @outfiles;
+	my $retval = 0;
+	my @jobs;
 	find(sub{
 			if(/([0-9]+)\.allperms\.RData$/){
 				my $outfile = "$outdir/Wstar.$1.RData" ;       
 				my $fname = create_compute_wstar_script($test_set,$ctrl_set,$filter,$snpfile,$File::Find::name,$missfile,$outfile);
 				my $cmd = "$GLOBALS{SM}{rscript} --vanilla $fname";
-				my $jid = dispatch_Rscript($cmd,"$logdir/compute_wstar");
-				push @jids,$jid;
-				push @outfiles,$outfile;
+				my $job = Sandman::Step::Job->new(command=>$cmd);
+				$step->add_job($job);
+				$retval=1;
 			}
 	},$permdir);
-	#do{sleep($GLOBALS{SM}{q_poll_time})} until check_task_finished(\@jids);
-	## are the tmp files cleared up automatically ?
-	return \@jids;
-	#return \@outfiles;
+	return $retval;
 }
 
-sub dispatch_Rscript{
-	my ($cmd,$ldir)=@_;
-	if(! -d $ldir){
-		if(!mkpath_wrapper($ldir)){
-			debug("Could not create log dir $ldir");
+## ANALYSIS STEPS
+
+sub run_support{
+	my($dirs,$snp_file,$args)=@_;
+	if(-e $args->{'geneset_file'}){
+		debug("FOUND GENESET creating GenomicRanges",$DEBUG);
+		my $outcome = create_gene_files(
+			$args->{'geneset_file'},
+			$dirs->{GR},
+			$GLOBALS{SM}{tabix_chunksize},
+			$MART_HOST,$args->{tss_extension},
+			$dirs->{LOG});
+		die("Could not create GenomicRange") unless $outcome;
+	}elsif(-e $args->{'regionset_file'}){ ## 1b or based on regions
+		debug("FOUND REGIONSET creating GenomicRanges",$DEBUG);
+			my $outcome = create_region_files(
+				$args->{'regionset_file'},
+				$dirs->{GR},
+				$dirs->{LOG});
+			die("Could not create GenomicRange") unless $outcome;
+	}
+	
+	## using defined catalog assign positional locations for snps
+	## in submitted pvalue file.
+	
+	my $outcome = run_lookup_snps(
+		$args->{'pval_file'},
+		$dirs->{GR},
+		$dirs->{TSNP},
+		$args->{'exclude_region_file'},
+		$GLOBALS{SM}{tabix_bin},$SNP_CATALOGUE,
+		$dirs->{LOG});
+	die("Could not lookup SNPs") unless $outcome;
+	$outcome=0;
+	$outcome = consolidate_snps($dirs->{TSNP},$snp_file,$dirs->{LOG});
+	die("Could not consolidate snps") unless $outcome;
+}
+
+sub run_sigma{
+	my($dirs,$snp_file,$sigdotfile,$args)=@_;
+	my $rarray;
+	if($args->{sigma_index}){
+	##retrieve sigmas
+	$rarray = retrieve_sigmas(
+		$snp_file,
+		$dirs->{SIGMA},
+		$args->{sigma_index},                                                   
+		$dirs->{SSNP},
+		$args->{gt_dir},
+		$args->{full_sigma},
+		$dirs->{LOG});
+	}else{
+		if(!-d $args->{gt_dir}){
+			die("Cannot find genotype dir ".$args->{gt_dir}.": If you haven't got genotypes consider using precomputed sigmas (sigma_index parameter)\n.")
+		}
+		$rarray = create_sigmas(
+			$snp_file,
+			$dirs->{SIGMA},
+			$args->{gt_dir},
+			$dirs->{SSNP},
+			$dirs->{LOG});
+    }
+		#write the snpfile to sigma mapping to a file
+		#doubles as evidence that we have done things and also 
+		#means we can run subsequent commands w/o having to run this
+		open(SIG,">$sigdotfile") || die "Cannot open sigma dot file: $sigdotfile\n";
+		foreach my $h(@$rarray){
+			print SIG join("\t",$h->{snpfile},$h->{sigmafile})."\n";
+		}
+		close(SIG);
+		if(!-z $sigdotfile){
+			return 1;
+		}else{
 			return 0;
 		}
-	}
-	my ($fh,$tfile) = &get_tmp_file($GLOBALS{SM}{grid_scratch});
-	my $jname = basename($tfile);
-	my $logfile = "$ldir/$jname.log";
-	if($GLOBALS{SM}{use_q}){
-		#first get a tmp file - we will write sh to this
-		#use the 
-		my $qcmd = "$GLOBALS{SM}{qsub} -o $logfile -j y $tfile";
-		#open(SCRIPT,">$tfile") || die "Cannot open temp shell script $tfile\n";
-		print $fh '#!/bin/bash'."\n$cmd";
-		close($fh);
-		debug("$qcmd");
-		my $out = `$qcmd`;
-		my $retval=0;
-		if($out =~/Your job ([0-9]+) \("$jname"\) has been submitted/){
-			$retval = $1;
-		}else{
-			die($tfile."\t:  ".$out."\n");
-		}
-		unlink("$tfile") unless $GLOBALS{SM}{keep_tmp_files};
-		return $retval;
-	}else{
-		## here we attempt to run interactively.
-		## TODO need to capture output to a log file nicely
-		debug("Running interactively: $cmd");
-		`$cmd > $logfile 2>&1`
-	}
 }
+
+sub run_perms{
+		my($dirs,$snp_file,$sigdotfile,$permsdotfile,$args)=@_;
+		if(-d $dirs->{PERMS}){
+			## clear up first
+			remove_tree(($dirs->{PERMS},$dirs->{TPERMS}),{keep_root => 1,result=> \my $del_dirs});
+			debug(join("\n",@$del_dirs),$DEBUG);
+		}
+		## read in sigma .file
+		my @jids;
+		if($args->{perm_dir}){
+			## use precomputed perms i.e from permuting genotypes in case/control
+			my $outcome = retrieve_perms($snp_file,
+				$dirs->{SSNP},
+				$args->{perm_dir},
+				$args->{perm_number},
+				$dirs->{TPERMS},
+				$dirs->{LOG});
+			die("Unable to retrieve perms \n") unless $outcome;
+		}else{ ## generate perms 
+			open(SIG, $sigdotfile) || die "Cannot find sigma dot file $sigdotfile\n";
+			my @plist;
+			while(<SIG>){
+				chomp;
+				my($sfile,$sigfile) = split("\t",$_);
+				my %hash = (snpfile=>$sfile,
+										sigmafile=>$sigfile);
+				push @plist,\%hash;
+			} 
+			close(SIG);
+			## clear up
 		
 	
-
-sub debug{
-	my $msg=shift;
-	my $ts = strftime("[%m/%d/%Y %H:%M:%S]", localtime);
-	print join("\t",$ts,$msg)."\n";
-}
-
-
-sub get_tmp_file{
-	my $dir = shift;
-	my $template = 'sandman_XXXXX';
-	return tempfile($template, DIR => $dir) if $dir;
-	return tempfile($template, TMPDIR => 1);
-}
-
-sub mkpath_wrapper{
-	my @dirs=@_;
-	make_path(@dirs,{verbose=>1,error => \my $err});
-	if(@$err){
-		for my $diag (@$err) {
-			my ($file, $message) = %$diag;
-			if ($file eq '') {
-				debug("general error: $message");
-			}else {
-				debug("problem creating $file: $message");
-			}
+			my $csize = ceil($args->{perm_number}/$GLOBALS{SM}{default_perm_per_chunk});
+			## $csize should be 1 if $DEFAULT_PERM_PER_CHUNK > perm_number
+			my $outcome = compute_perms(\@plist,$dirs->{TPERMS},
+					$GLOBALS{SM}{default_perm_per_chunk},$args->{full_sigma},$dirs->{LOG},$csize);
+			die "Unable to compute perms" unless $outcome;
+		} 
+		my $outfiles = collapse_perms($dirs->{TPERMS},$dirs->{PERMS},$dirs->{LOG});
+		open(SIG,">$permsdotfile") || die "Cannot open perms dot file: $permsdotfile\n";
+		foreach my $f (@$outfiles){
+			print SIG "$f\n";
 		}
-		return 0;
-	}
-	return 1;
-}
-
-sub get_current_joblist{
-	my $optional_params = shift;
-	open(QJF,"qstat $optional_params |") || die "$@\n";
-	my %jobs;
-	while(<QJF>){
-		chomp;
-		next unless /^[0-9]+/;
-		my @vals=split(/\s+/,$_);
-		$jobs{$vals[0]}={
-				name=>$vals[2],
-				status=>$vals[4]
-		}
-	}
-	return \%jobs;
-}
-
-sub check_task_finished{
-	my ($joblist,$qstat_params)=@_;
-	my $jobs = &get_current_joblist();
-	my %outstanding_jobs;
-	foreach my $j(@$joblist){
-		if(my $details = $jobs->{$j}){
-			if($details->{status} !~/E/){
-				push @{$outstanding_jobs{$details->{status}}},$j;
-			}else{
-				## if we get any errors going to be difficult to recover.
-				die "Job $j has failed - please check logs\n";
-			}
-		}
-	}
-	my @report;
-	foreach my $k(keys %outstanding_jobs){
-		push @report,scalar(@{$outstanding_jobs{$k}}).": $k";
-	}
-	return 1 if !@report;
-	debug(join("\t",@report,"running on the queue"));
-	return 0;
-}
-
-=head2 yesno
-
- NAME: yesno
- ARGS: STRING - represents question to ask
- FUNCTION: Writes a question to the terminal and waits for a y or n keystroke
- RETURNS : Boolean true or false
-
-=cut
-
-sub yesno{
-	my($question)=shift;
-	if(!$question){
-		warn "[WARNING] No question: returning false\n";
-		return 0;
-	}
-	ReadMode('cbreak');
-	print "$question?\n";
-	my $dyes = "Please enter y or n. Use Ctrl-C to quit.\n";
-	while(1){
-		my $char = ReadKey(0);
-		if($char!~/[yn]/i){
-			print $dyes;
+		close(SIG);
+			if(!-z $permsdotfile){
+			return 1;
 		}else{
-			ReadMode('normal');
-			return $char =~/y/i?1:0;
+			return 0;
 		}
+}
+
+sub run_wstar{
+	my ($analysis,$dirs,$snp_file,$force,$args)=@_;
+	my %wparams;
+	my $step = Sandman::Step->new(
+		logdir=>$dirs->{LOG}."/compute_wstar",
+		driver=>$DRIVER,
+		env_settings=>"R_LIBS=$RLIBS"
+	);
+	my $miss_file = $dirs->{PERMS}."/.missing";
+	my $skip_count=0;
+	foreach my $al(keys %$analysis){
+		$wparams{$al}{test_set}=$analysis->{$al}->[0];
+		$wparams{$al}{ref_set}=$analysis->{$al}->[1];
+		my $wstardir = $dirs->{WSTAR}."/".$wparams{$al}{test_set}.'_VS_'.$wparams{$al}{ref_set};
+		$wparams{$al}{wstardir} = $wstardir;
+		$wparams{$al}{missingfile}=$miss_file;
+		#die($wstardir);
+		my $run_wstar = 1;
+		if((-d $wstardir || -e basename($wstardir).".Wstar.RData") && !$force){
+			if(!yesno("wstar: $wstardir dir found do you wish to recompute?")){
+				$skip_count++;
+				next;
+			}
+		}
+		if($run_wstar){
+				## clear up
+			if(-d $wstardir){
+				## clear up first
+				remove_tree($wstardir,{keep_root => 1,result=> \my $del_dirs});
+				debug(join("\n",@$del_dirs),$DEBUG);
+			}
+	
+		  my $outcome = compute_wstar(
+		  	$wparams{$al}{test_set},$wparams{$al}{ref_set},
+		  	$args->{filter},$snp_file,$dirs->{PERMS},
+		  	$dirs->{WSTAR},$miss_file,$step,$dirs->{LOG});
+		  die ("Unable to compute Wstar for ".$wparams{$al}{test_set}." VS "
+		  	.$wparams{$al}{ref_set}) unless $outcome;
+		}
+	}
+	## for the case where the user skips all analysis
+	## else we end up dieing as do_step has nothing to do !
+	return \%wparams if scalar(keys %wparams) == $skip_count;
+	if(do_step($step)){
+		return \%wparams;
+	}else{
+		die "Unable to compute wstar ";
+	}
+}
+
+sub run_consolidate_wstar_and_w{
+	my ($wparams,$dirs,$snp_file,$args)=@_;
+	my ($wparams,$dirs) = @_;
+	my $step = Sandman::Step->new(
+		logdir=>$dirs->{LOG}."/consolidate_wstar_and_w",
+		driver=>$DRIVER,
+		env_settings=>"R_LIBS=$RLIBS"
+	);
+	foreach my $al(keys %$wparams){
+		my $d = $wparams->{$al}->{wstardir};
+		next unless $d; ## this means wstar was not computed on this run so below does not change
+		my $wstarfile = $dirs->{WSTAR}.'/'.basename($d).".Wstar.RData";
+		$wparams->{$al}->{wstarfile} = $wstarfile;
+		debug("Consolidating $d",$DEBUG);
+		my $outcome = consolidate_wstar($d,$wstarfile,$step,$dirs->{LOG});
+		die("Could not consolidate wstar for $d") unless $outcome;
+		my $wfile = $dirs->{WSTAR}.'/'.basename($d).".W.RData";
+		debug("Computing W",$DEBUG);
+		my $outcome = compute_w($snp_file,$wfile,$wparams->{$al}->{test_set},
+			$wparams->{$al}->{ref_set},$args->{filter},
+			$wparams->{$al}->{missingfile},$step,$dirs->{LOG});
+		 die ("Unable to compute W for ".$wparams->{$al}->{test_set}." VS "
+		  	.$wparams->{$al}->{ref_set}) unless $outcome;
+		$wparams->{$al}->{wfile} = $wfile;
+	}
+	if(do_step($step)){
+		return $wparams;
+	}else{
+		die "Unable to consolidate wstar or compute w ";
 	}
 }
 

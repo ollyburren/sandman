@@ -1,0 +1,9 @@
+[SGE]
+qsub_bin = /usr/bin/qsub
+qstat_bin = /usr/bin/qstat
+qname = all.q
+qscatch = /stats/oliver/SANDMAN/
+qpoll_time = 5
+## note that if not set then will default to user env setting
+shell_path = /bin/bash 
+keep_tmp_files = 0

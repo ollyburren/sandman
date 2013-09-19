@@ -71,6 +71,9 @@ full_sigma=0
 ## control genotype LD/gene. Be careful using this for 
 ## very dense snp maps and non gene based region analysis.
 ## It will rapidly fill your disk!
+## NOTE that due to technical constraints if you want to include 
+## regions/genes on X chromosome, and want to use precomputed
+## sigma you will need to supply genotypes here.
 gt_dir=
 ## Location of summary p.vals for GWAS
 pval_file=
@@ -78,13 +81,13 @@ pval_file=
 snp_catalog=
 ## OPTIONAL: location of pregenerated permutations 
 ## (such as through cc permutation and genotypes)
-perm_dir=
+precomp_perm_dir=
 
 [DATASET ds2]
 gt_dir=
 pval_file=
 snp_catalog=
-perm_dir=
+precomp_perm_dir=
 
 GENESET FILE - Use if you have a list of genes
 
