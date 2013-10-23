@@ -8,3 +8,5 @@ Add better function documentation main perl script and decruft code.
 Allow users to add own snpCatalogs in pseudo bed format with boolean fields to allow filtering on precomputed LD
 Allow region based analysis rather than gene-based.
 Beef up support scripts etc and documentation.
+Add MVS to wgsea
+Design modular q submission libraries to support queue software other than SGE
